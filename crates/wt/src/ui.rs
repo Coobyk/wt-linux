@@ -28,6 +28,8 @@ pub struct State {
     font_family_mono: bool,
     scheme: ColorScheme,
     cursor_shape: CursorShape,
+    /// Last laid-out screen rect, to refit the grid when the font size changes.
+    screen: Option<[f32; 4]>,
     error: Option<String>,
 }
 
@@ -49,6 +51,7 @@ impl State {
             font_family_mono: true,
             scheme: first.color_scheme.clone(),
             cursor_shape: first.cursor_shape,
+            screen: None,
             config: launch.config,
             waker,
             notify,
@@ -110,6 +113,7 @@ impl State {
     }
 
     fn fit(&mut self, rect: [f32; 4]) {
+        self.screen = Some(rect);
         let (cw, ch) = self.cell();
         let cols = ((rect[2] - 2.0 * PAD) / cw).floor().clamp(1.0, 1000.0) as u16;
         let rows = ((rect[3] - 2.0 * PAD) / ch).floor().clamp(1.0, 1000.0) as u16;
@@ -141,6 +145,11 @@ impl State {
             }
             // TODO(wt-app): copy/paste/find/palette/splits/scrolling/fullscreen live in the shell.
             _ => return false,
+        }
+        if action.ends_with("_font_size")
+            && let Some(r) = self.screen
+        {
+            self.fit(r);
         }
         true
     }
