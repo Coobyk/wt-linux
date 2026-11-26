@@ -182,7 +182,8 @@ fn read_loop(mut src: Source, closing: &AtomicBool, tx: &Sender<PtyEvent>, share
             use crate::fd::{CLOSE_POLL_MS, Readiness, poll};
             use std::os::fd::AsRawFd;
             match poll(src.as_raw_fd(), libc::POLLIN, CLOSE_POLL_MS) {
-                Readiness::Ready => {}
+                // POLLHUP/POLLERR land here too; the read reports them.
+                Readiness::Ready(_) => {}
                 Readiness::Timeout => continue,
                 Readiness::Failed => return,
             }
