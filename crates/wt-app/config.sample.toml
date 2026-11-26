@@ -1,0 +1,72 @@
+# wt-linux sample config. Copy to $XDG_CONFIG_HOME/wt-linux/config.toml
+# (default ~/.config/wt-linux/config.toml). Schema: crates/wt-app/CONFIG.md.
+
+default_profile = "Bash"
+theme = "dark"            # "dark" | "light"
+
+[window]
+width = 1100
+height = 680
+
+# Defaults for profiles that don't set `font`.
+[font]
+family = "mono"           # "mono" (bundled), "system-mono", or a family name
+size = 13
+
+[[profiles]]
+name = "Bash"
+program = "/bin/bash"
+args = ["-l"]
+cwd = "~"
+color_scheme = "Campbell"
+opacity = 1.0
+
+[[profiles]]
+name = "Zsh"
+program = "zsh"
+color_scheme = "One Half Dark"
+opacity = 0.9
+font = { family = "mono", size = 14 }
+
+[[profiles]]
+name = "htop"
+program = "htop"
+cwd = "/"
+color_scheme = "One Half Dark"
+env = { TERM = "xterm-256color" }
+
+# Extra colour schemes. Built-ins: "Campbell", "One Half Dark", "One Half Light".
+[[schemes]]
+name = "Solarized Dark"
+foreground = "#839496"
+background = "#002b36"
+cursor = "#93a1a1"
+black = "#002b36"
+red = "#dc322f"
+green = "#859900"
+yellow = "#b58900"
+blue = "#268bd2"
+purple = "#d33682"
+cyan = "#2aa198"
+white = "#eee8d5"
+bright_black = "#073642"
+bright_red = "#cb4b16"
+bright_green = "#586e75"
+bright_yellow = "#657b83"
+bright_blue = "#839496"
+bright_purple = "#6c71c4"
+bright_cyan = "#93a1a1"
+bright_white = "#fdf6e3"
+
+# action = "chord" or ["chord", ...]; "" or [] unbinds. Unlisted actions keep defaults.
+[keybindings]
+new_tab = "ctrl+shift+t"
+close_tab = "ctrl+shift+f4"
+split_vertical = "alt+shift+="
+split_horizontal = "alt+shift+-"
+open_palette = ["ctrl+shift+p", "f1"]
+next_tab = "ctrl+tab"
+prev_tab = "ctrl+shift+tab"
+font_size_increase = ["ctrl+=", "ctrl+plus"]
+font_size_decrease = "ctrl+-"
+"switch_to_tab:1" = "ctrl+alt+1"
