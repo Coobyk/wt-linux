@@ -28,7 +28,7 @@ real-app = ["dep:wt-app", "real-backend", "real-vt"]
 anyhow.workspace = true
 serde.workspace = true
 toml.workspace = true
-rune = { workspace = true, optional = true }
+rune = { workspace = true, optional = true, features = ["tooling"] }
 wt-app = { path = "../wt-app", optional = true }
 wt-backend = { path = "../wt-backend", optional = true }
 wt-render = { path = "../wt-render", optional = true }
