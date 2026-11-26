@@ -124,19 +124,18 @@ fn canonical(spec: &str) -> String {
     }
     let mut parts: Vec<&str> = spec.split('+').collect();
     let key = parts.pop().unwrap_or_default();
-    let mut mods: Vec<&str> = Vec::new();
-    for m in parts {
-        let m = if m.trim().eq_ignore_ascii_case("mod") {
-            "ctrl"
-        } else {
-            m
-        };
-        if m.is_empty() || !mods.iter().any(|x| x.trim().eq_ignore_ascii_case(m.trim())) {
-            mods.push(m);
-        }
+    let is = |t: &str, m: &str| t.trim().eq_ignore_ascii_case(m);
+    let Some(at) = parts.iter().position(|t| is(t, "mod")) else {
+        return spec.to_string();
+    };
+    // Only the `ctrl` that `mod` stands for is merged; other repeats are left for Rune to reject.
+    if parts.iter().any(|t| is(t, "ctrl")) {
+        parts.remove(at);
+    } else {
+        parts[at] = "ctrl";
     }
-    mods.push(key);
-    mods.join("+")
+    parts.push(key);
+    parts.join("+")
 }
 
 /// "ctrl+shift+t" -> "Ctrl+Shift+T".
@@ -255,6 +254,7 @@ mod tests {
         k.bind(Action::Quit, "mod+ctrl+q").unwrap();
         assert_eq!(k.keys_for(Action::Quit), ["mod+ctrl+q"]);
         assert_eq!(canonical("ctrl+mod++"), "ctrl++");
+        assert!(k.bind(Action::Quit, "ctrl+shift+shift+t").is_err());
     }
 
     #[test]
