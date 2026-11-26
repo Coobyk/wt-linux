@@ -77,8 +77,9 @@ grid contents. Plus a random-bytes no-panic test.
 - Synchronized updates (`CSI ?2026h`) are buffered by the parser. wt-app should call
   `flush_expired_sync_update()` when `sync_update_deadline()` passes (no new bytes may
   arrive), and `flush_sync_update()` when the child exits.
-- Kitty keyboard protocol is off until wt-app calls `set_kitty_keyboard(true)` (only do so
-  once the key encoder honours `Modes::kitty_keyboard`).
+- Kitty keyboard protocol is not supported: `CSI > u` etc. are ignored and
+  `Modes::kitty_keyboard` is always 0. Alacritty 0.26's implementation is buggy (panics on
+  stack overflow, `CSI = u` not reported), so enabling it needs our own stack in the shim.
 - Grid width is clamped to at least 2 columns so a wide character always fits.
 - `src/shim.rs` also works around alacritty bugs: DCH past the row end, relative cursor
   moves in origin mode, color-query reply ordering, and RIS not resetting the title.

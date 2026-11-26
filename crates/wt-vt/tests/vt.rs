@@ -658,15 +658,11 @@ fn origin_mode_relative_moves() {
 }
 
 #[test]
-fn kitty_keyboard_opt_in() {
+fn kitty_keyboard_is_disabled() {
     let mut t = term(10, 2);
-    t.feed(b"\x1b[>1u");
-    assert_eq!(t.modes().kitty_keyboard, 0);
-    t.set_kitty_keyboard(true);
-    assert!(t.take_events().is_empty());
     t.feed(b"\x1b[>1u\x1b[?u");
-    assert_eq!(t.modes().kitty_keyboard, 1);
-    assert_eq!(t.take_replies(), b"\x1b[?1u");
+    assert_eq!(t.modes().kitty_keyboard, 0);
+    assert!(t.take_replies().is_empty());
 }
 
 #[test]

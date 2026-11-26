@@ -232,7 +232,6 @@ pub struct Terminal {
     events: Vec<TermEvent>,
     title: Option<String>,
     cell_px: Option<(u16, u16)>,
-    config: term::Config,
     full_damage: bool,
 }
 
@@ -247,7 +246,7 @@ impl Terminal {
         };
         let size = Size::clamped(cols, rows);
         Self {
-            term: Term::new(config.clone(), &size, listener.clone()),
+            term: Term::new(config, &size, listener.clone()),
             parser: ansi::Processor::new(),
             listener,
             palette: Palette::default(),
@@ -255,7 +254,6 @@ impl Terminal {
             events: Vec::new(),
             title: None,
             cell_px: None,
-            config,
             full_damage: false,
         }
     }
@@ -443,21 +441,6 @@ impl Terminal {
     pub fn set_palette(&mut self, palette: Palette) {
         self.palette = palette;
         self.full_damage = true;
-    }
-
-    /// Allow apps to enable the kitty keyboard protocol (`CSI > u`). Off by default:
-    /// only enable it once the input encoder handles [`Modes::kitty_keyboard`] flags.
-    pub fn set_kitty_keyboard(&mut self, enabled: bool) {
-        if self.config.kitty_keyboard != enabled {
-            self.config.kitty_keyboard = enabled;
-            self.term.set_options(self.config.clone());
-            // `set_options` re-announces the current title; that is not a new event.
-            self.listener
-                .0
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .clear();
-        }
     }
 
     /// Cell size in pixels, used to answer `CSI 14 t` (text area size in pixels).
