@@ -87,9 +87,11 @@ impl Drop for Pty {
 struct SharedStdin(Arc<Mutex<Option<ChildStdin>>>);
 
 impl Write for SharedStdin {
+    /// `\r` -> `\n`, as a tty's ICRNL input flag does, so Enter submits a line.
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let translated: Vec<u8> = buf.iter().map(|&b| if b == b'\r' { b'\n' } else { b }).collect();
         match self.0.lock().unwrap().as_mut() {
-            Some(s) => s.write(buf),
+            Some(s) => s.write_all(&translated).map(|()| buf.len()),
             None => Err(std::io::ErrorKind::BrokenPipe.into()),
         }
     }

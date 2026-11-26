@@ -52,7 +52,7 @@ fn pump_feeds_terminal_and_notifies() {
 #[cfg(not(feature = "real-vt"))]
 fn writes_reach_the_child() {
     let mut s = Session::spawn(profile(&["head", "-n1"]), 20, 4, 100, Arc::new(|| {})).unwrap();
-    s.write(b"ping\n");
+    s.write(b"ping\r");
     wait_finished(&mut s);
     assert_eq!(screen(&s)[0], "ping");
 }
