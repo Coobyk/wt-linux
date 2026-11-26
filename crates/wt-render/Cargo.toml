@@ -7,3 +7,7 @@ license.workspace = true
 anyhow.workspace = true
 rune.workspace = true
 wt-vt = { path = "../wt-vt" }
+
+[features]
+# `wt_render::mock::MockTerminal`, a fake `TermSource` for building on `TerminalView` before `wt-vt` lands.
+mock = []
