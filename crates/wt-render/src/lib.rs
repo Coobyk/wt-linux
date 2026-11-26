@@ -10,6 +10,7 @@ mod model;
 mod palette;
 mod row;
 mod view;
+mod vt;
 
 pub use model::Attrs;
 pub use model::Cell;
