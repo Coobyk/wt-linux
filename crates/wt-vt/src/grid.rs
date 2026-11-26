@@ -121,8 +121,10 @@ impl<'a> GridView<'a> {
                 .bounds_to_string(start, APoint::new(end.line, last - 1));
             if end.line.0 + 1 < self.rows() as i32 {
                 let next = &self.term.grid()[Line(end.line.0 + 1)][Column(0)];
-                text.push(next.c);
-                text.extend(next.zerowidth().into_iter().flatten());
+                if next.flags.contains(Flags::WIDE_CHAR) {
+                    text.push(next.c);
+                    text.extend(next.zerowidth().into_iter().flatten());
+                }
             }
             return text;
         }

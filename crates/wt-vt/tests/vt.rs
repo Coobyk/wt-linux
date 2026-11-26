@@ -601,6 +601,12 @@ fn text_range_includes_wrapped_wide_char() {
     assert_eq!(g.line(0).cell(4).width, CellWidth::LeadingSpacer);
     assert_eq!(g.text_range(Point::new(0, 0), Point::new(0, 4)), "abcd漢");
     assert_eq!(g.text_range(Point::new(0, 0), Point::new(1, 2)), "abcd漢x");
+    // Continuation row erased: the orphaned spacer must not copy a blank.
+    t.feed(b"\x1b[2;1H\x1b[2K");
+    assert_eq!(
+        t.grid().text_range(Point::new(0, 0), Point::new(0, 4)),
+        "abcd"
+    );
 }
 
 #[test]
