@@ -122,16 +122,21 @@ fn canonical(spec: &str) -> String {
     if cfg!(target_os = "macos") {
         return spec.to_string();
     }
-    spec.split('+')
-        .map(|t| {
-            if t.trim().eq_ignore_ascii_case("mod") {
-                "ctrl"
-            } else {
-                t
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("+")
+    let mut parts: Vec<&str> = spec.split('+').collect();
+    let key = parts.pop().unwrap_or_default();
+    let mut mods: Vec<&str> = Vec::new();
+    for m in parts {
+        let m = if m.trim().eq_ignore_ascii_case("mod") {
+            "ctrl"
+        } else {
+            m
+        };
+        if m.is_empty() || !mods.iter().any(|x| x.trim().eq_ignore_ascii_case(m.trim())) {
+            mods.push(m);
+        }
+    }
+    mods.push(key);
+    mods.join("+")
 }
 
 /// "ctrl+shift+t" -> "Ctrl+Shift+T".
@@ -241,6 +246,15 @@ mod tests {
     fn pretty_labels() {
         assert_eq!(pretty("ctrl+shift+t"), "Ctrl+Shift+T");
         assert_eq!(pretty("ctrl++"), "Ctrl++");
+    }
+
+    #[test]
+    #[cfg(not(target_os = "macos"))]
+    fn mod_and_ctrl_together_still_bind() {
+        let mut k = Keymap::defaults();
+        k.bind(Action::Quit, "mod+ctrl+q").unwrap();
+        assert_eq!(k.keys_for(Action::Quit), ["mod+ctrl+q"]);
+        assert_eq!(canonical("ctrl+mod++"), "ctrl++");
     }
 
     #[test]
