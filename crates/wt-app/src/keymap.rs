@@ -128,11 +128,12 @@ fn canonical(spec: &str) -> String {
     let Some(at) = parts.iter().position(|t| is(t, "mod")) else {
         return spec.to_string();
     };
-    // Only the `ctrl` that `mod` stands for is merged; other repeats are left for Rune to reject.
-    if parts.iter().any(|t| is(t, "ctrl")) {
-        parts.remove(at);
-    } else {
-        parts[at] = "ctrl";
+    // `mod` is Ctrl here: every `mod` collapses into one `ctrl`; other repeats are left for
+    // Rune to reject.
+    let has_ctrl = parts.iter().any(|t| is(t, "ctrl"));
+    parts.retain(|t| !is(t, "mod"));
+    if !has_ctrl {
+        parts.insert(at, "ctrl");
     }
     parts.push(key);
     parts.join("+")
@@ -254,6 +255,7 @@ mod tests {
         k.bind(Action::Quit, "mod+ctrl+q").unwrap();
         assert_eq!(k.keys_for(Action::Quit), ["mod+ctrl+q"]);
         assert_eq!(canonical("ctrl+mod++"), "ctrl++");
+        assert_eq!(canonical("mod+mod+shift+t"), "ctrl+shift+t");
         assert!(k.bind(Action::Quit, "ctrl+shift+shift+t").is_err());
     }
 
