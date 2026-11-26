@@ -27,7 +27,7 @@ pub struct TerminalView {
     palette: Palette,
     font_size: f32,
     cell: Slot<Option<(f32, f32)>>,
-    advance: Slot<Option<f32>>,
+    advance: Slot<Option<(u64, f32)>>,
     focused: bool,
     config: Slot<u64>,
     rows: RefCell<Vec<CachedRow>>,
@@ -82,16 +82,17 @@ impl TerminalView {
 
     pub fn metrics(&self) -> Metrics {
         let base = TextStyle::new(self.font_size, 400.0).mono();
-        let natural = rune::text::advance("0000000000", base) / 10.0;
-        let natural = if natural > 0.0 {
-            natural
-        } else {
-            self.font_size * 0.6
+        let epoch = rune::text::font_epoch();
+        let natural = match self.advance.get() {
+            Some((e, w)) if e == epoch => w,
+            _ => {
+                let w = rune::text::advance("0000000000", base) / 10.0;
+                let w = if w > 0.0 { w } else { self.font_size * 0.6 };
+                self.advance.set(Some((epoch, w)));
+                self.rehash_config();
+                w
+            }
         };
-        if self.advance.get() != Some(natural) {
-            self.advance.set(Some(natural));
-            self.rehash_config();
-        }
         let (w, h) = self
             .cell
             .get()
@@ -128,7 +129,10 @@ impl TerminalView {
         if let Some((w, ch)) = self.cell.get() {
             (w.to_bits(), ch.to_bits()).hash(&mut h);
         }
-        self.advance.get().map(f32::to_bits).hash(&mut h);
+        self.advance
+            .get()
+            .map(|(e, w)| (e, w.to_bits()))
+            .hash(&mut h);
         self.config.set(h.finish());
     }
 
