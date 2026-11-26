@@ -1,12 +1,35 @@
 [package]
 name = "wt"
+version = "0.1.0"
+description = "wt-linux: Windows Terminal, for Linux"
 edition.workspace = true
 license.workspace = true
+
+[lib]
+name = "wt"
+path = "src/lib.rs"
+
+[[bin]]
+name = "wt"
+path = "src/main.rs"
+
+[features]
+default = ["ui"]
+# Built-in Rune window with a plain-text stand-in for wt-render's TerminalView, used until
+# wt-app lands. Renders the stub terminal; `real-app` replaces it.
+ui = ["dep:rune"]
+# Use the sibling crates instead of the in-crate contract stubs (src/stub/).
+real-backend = ["dep:wt-backend"]
+# wt-vt and the wt-render TerminalView that draws it come as a pair.
+real-vt = ["dep:wt-vt", "dep:wt-render"]
+real-app = ["dep:wt-app", "real-backend", "real-vt"]
 
 [dependencies]
 anyhow.workspace = true
 serde.workspace = true
 toml.workspace = true
-wt-app = { path = "../wt-app" }
-wt-backend = { path = "../wt-backend" }
-wt-vt = { path = "../wt-vt" }
+rune = { workspace = true, optional = true, features = ["tooling"] }
+wt-app = { path = "../wt-app", optional = true }
+wt-backend = { path = "../wt-backend", optional = true }
+wt-render = { path = "../wt-render", optional = true }
+wt-vt = { path = "../wt-vt", optional = true }
