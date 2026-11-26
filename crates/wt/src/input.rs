@@ -12,13 +12,13 @@ pub fn matches(c: &Chord, ev: &KeyEvent) -> bool {
     match (&c.key, &ev.key) {
         // Shifted punctuation (`+` is Shift+= on most layouts) carries Shift implicitly.
         (ChordKey::Char(ch), Key::Command(k)) => {
-            ch == k && (c.shift == m.shift || !ch.is_alphanumeric())
+            ch == k && (c.shift == m.shift || (!c.shift && !ch.is_alphanumeric()))
         }
         (ChordKey::Char(ch), Key::Text(t)) => {
             let mut it = t.chars().flat_map(char::to_lowercase);
             let one = matches!((it.next(), it.next()), (Some(k), None) if k == *ch);
             // Shifted punctuation (`+` is Shift+= on most layouts) carries Shift implicitly.
-            one && (c.shift == m.shift || !ch.is_alphanumeric())
+            one && (c.shift == m.shift || (!c.shift && !ch.is_alphanumeric()))
         }
         (ChordKey::Function(n), Key::Function(k)) => n == k && c.shift == m.shift,
         (ChordKey::Named(n), k) => named(k) == Some(*n) && c.shift == m.shift,
@@ -187,6 +187,11 @@ mod tests {
                 ctrl(m);
                 m.shift = true;
             })
+        ));
+        // Implicit Shift only goes one way: a chord that asks for Shift still needs it.
+        assert!(!matches(
+            &Chord::parse("ctrl+shift+minus").unwrap(),
+            &ev(Key::Command('-'), ctrl)
         ));
         let keymap = vec![("new_tab".to_owned(), c)];
         assert_eq!(

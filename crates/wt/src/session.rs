@@ -29,7 +29,8 @@ pub struct Session {
     pub profile: ResolvedProfile,
     pub term: Terminal,
     pty: Pty,
-    writer: Box<dyn Write + Send>,
+    /// Input goes through a writer thread so a child that isn't reading never blocks the UI.
+    input_tx: mpsc::Sender<Vec<u8>>,
     rx: Receiver<Vec<u8>>,
     pending: Arc<AtomicBool>,
     eof: bool,
@@ -67,10 +68,25 @@ impl Session {
         std::thread::Builder::new()
             .name(format!("wt-pump-{}", profile.name))
             .spawn(move || pump(reader, tx, flag, notify))?;
+        let (input_tx, input_rx) = mpsc::channel::<Vec<u8>>();
+        let mut writer = pty.writer();
+        std::thread::Builder::new()
+            .name(format!("wt-input-{}", profile.name))
+            .spawn(move || {
+                for bytes in input_rx {
+                    if writer
+                        .write_all(&bytes)
+                        .and_then(|()| writer.flush())
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            })?;
         Ok(Session {
             title: profile.name.clone(),
             term: Terminal::new(cols, rows, scrollback),
-            writer: pty.writer(),
+            input_tx,
             profile,
             pty,
             rx,
@@ -126,13 +142,7 @@ impl Session {
     }
 
     pub fn write(&mut self, bytes: &[u8]) {
-        if !self.eof
-            && self
-                .writer
-                .write_all(bytes)
-                .and_then(|_| self.writer.flush())
-                .is_err()
-        {
+        if !self.eof && self.input_tx.send(bytes.to_vec()).is_err() {
             self.eof = true;
         }
     }
