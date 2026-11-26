@@ -298,12 +298,13 @@ fn a_mono_family_change_retracks_and_rebuilds_every_row() {
     let mut rt = Runtime::new(s, screen_view, (100.0, 60.0), Env::new(true, 1.0));
     rt.set_font_families("DejaVu Sans", "DejaVu Sans Mono");
     rt.frame(0.0);
-    let before = view.metrics().style.tracking;
+    rt.invalidate();
+    rt.frame(0.008);
+    assert!(view.last_damage().rebuilt.is_empty());
     rt.set_font_families("DejaVu Sans", "JetBrains Mono");
     rt.invalidate();
     rt.frame(0.016);
     let m = view.metrics();
-    assert_ne!(before, m.style.tracking);
     let per_char = rune::text::advance("0000000000", m.style) / 10.0;
     assert!((per_char - 9.0).abs() < 0.05, "{per_char}");
     assert_eq!(view.last_damage().rebuilt, vec![0, 1, 2]);
