@@ -389,18 +389,31 @@ fn drop_types_nothing_into_the_shell() {
     let exit = pty.exit.clone();
     // Holding a master fd keeps the tty from hanging up (and discarding input) on drop;
     // reading it confirms the shell is waiting and the tty echoed the partial line.
+    // The read thread owns that fd until EOF, so it stays open across the drop.
     let mut keep = pty.reader();
-    let wait_for = |keep: &mut Box<dyn Read + Send>, want: &str| {
-        let (mut out, mut buf) = (Vec::new(), [0u8; 256]);
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut buf = [0u8; 256];
+        while let Ok(n @ 1..) = keep.read(&mut buf) {
+            if tx.send(buf[..n].to_vec()).is_err() {
+                return;
+            }
+        }
+    });
+    let mut out = Vec::new();
+    let mut wait_for = |want: &str| {
+        let deadline = Instant::now() + TIMEOUT;
         while !String::from_utf8_lossy(&out).contains(want) {
-            let n = keep.read(&mut buf).unwrap();
-            assert!(n > 0, "eof before {want:?}: {out:?}");
-            out.extend_from_slice(&buf[..n]);
+            let left = deadline.saturating_duration_since(Instant::now());
+            match rx.recv_timeout(left) {
+                Ok(b) => out.extend_from_slice(&b),
+                Err(_) => panic!("no {want:?}; output: {:?}", String::from_utf8_lossy(&out)),
+            }
         }
     };
-    wait_for(&mut keep, "ready");
+    wait_for("ready");
     pty.writer().write_all(b"half-typed").unwrap();
-    wait_for(&mut keep, "half-typed");
+    wait_for("half-typed");
     drop(pty);
     exit.wait_timeout(TIMEOUT).expect("child not killed");
     assert!(!marker.exists(), "dropping the pty submitted the pending line");
