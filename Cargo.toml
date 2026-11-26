@@ -15,8 +15,20 @@ repository = "https://github.com/Coobyk/wt-linux"
 
 [workspace.dependencies]
 # Rune is pre-release; pin a rev of `dev` (the branch is never rewritten).
-rune = { git = "https://github.com/anomalyco/rune", branch = "dev" }
+rune = { git = "https://github.com/anomalyco/rune", rev = "9391c20d56daa8508c6b825c973157be5eb4a89a" }
 portable-pty = "0.9"
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 toml = "0.9"
+
+# Rune's own [patch.crates-io] table at the pinned rev; cargo does not inherit a
+# dependency's patches, and rune-text does not resolve without them.
+[patch.crates-io]
+wgpu-hal = { git = "https://github.com/anomalyco/rune", rev = "9391c20d56daa8508c6b825c973157be5eb4a89a" }
+naga = { git = "https://github.com/anomalyco/rune", rev = "9391c20d56daa8508c6b825c973157be5eb4a89a" }
+winit = { git = "https://github.com/anomalyco/rune", rev = "9391c20d56daa8508c6b825c973157be5eb4a89a" }
+sctk-adwaita = { git = "https://github.com/anomalyco/rune", rev = "9391c20d56daa8508c6b825c973157be5eb4a89a" }
+parley_engine = { git = "https://github.com/anomalyco/rune", rev = "9391c20d56daa8508c6b825c973157be5eb4a89a" }
+accesskit_windows = { git = "https://github.com/anomalyco/rune", rev = "9391c20d56daa8508c6b825c973157be5eb4a89a" }
+accesskit_atspi_common = { git = "https://github.com/anomalyco/rune", rev = "9391c20d56daa8508c6b825c973157be5eb4a89a" }
+accesskit_macos = { git = "https://github.com/anomalyco/rune", rev = "9391c20d56daa8508c6b825c973157be5eb4a89a" }
