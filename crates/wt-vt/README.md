@@ -68,12 +68,6 @@ grid contents. Plus a random-bytes no-panic test.
 
 ## Notes / gaps for sibling crates
 
-- **Workspace currently fails to resolve** (any `cargo build -p …`), not because of this
-  crate: Rune's `dev` branch vendors patched crates (`parley_engine` with the
-  `line-dictionaries` feature, `winit`, `wgpu-hal`, `naga`, `sctk-adwaita`, `accesskit_*`)
-  and says "apps that build Rune patch it too". The root `Cargo.toml` needs a
-  `[patch.crates-io]` section pointing those at Rune's `vendor/` dirs (same git rev). Until
-  then, build with a local `--config` file containing that patch section.
 - Synchronized updates (`CSI ?2026h`) are buffered by the parser. wt-app should call
   `flush_expired_sync_update()` when `sync_update_deadline()` passes (no new bytes may
   arrive), and `flush_sync_update()` when the child exits.
