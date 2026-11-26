@@ -23,6 +23,7 @@ fn main() {
         bytes.push(b);
     }
     term.feed(&bytes);
+    term.flush_sync_update();
 
     let grid = term.grid();
     println!("{term:?}");
