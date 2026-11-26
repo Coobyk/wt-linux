@@ -71,6 +71,8 @@ fn run(launch: launch::Launch) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    let mut input = s.input();
+    std::thread::spawn(move || std::io::copy(&mut std::io::stdin().lock(), &mut input));
     while !(s.is_finished() && s.exit_status().is_some()) {
         s.drain(wt::session::DRAIN_BUDGET);
         std::thread::sleep(std::time::Duration::from_millis(5));

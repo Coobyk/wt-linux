@@ -121,6 +121,11 @@ impl Session {
         self.exit
     }
 
+    /// Another handle on the child's input, for forwarding a stream (headless stdin).
+    pub fn input(&self) -> Box<dyn Write + Send> {
+        self.pty.writer()
+    }
+
     pub fn write(&mut self, bytes: &[u8]) {
         if !self.eof
             && self
