@@ -98,13 +98,4 @@ releasing a writer stalled on a full tty queue.
 
 ## Notes for siblings
 
-- Resolving this workspace needs Rune's `[patch.crates-io]` entries in the root `Cargo.toml`
-  (`rune-text` asks for `parley_engine`'s `line-dictionaries` feature, which only Rune's
-  vendored copy has; `winit`, `wgpu-hal`, `naga`, `sctk-adwaita`, `accesskit_*` are patched
-  the same way). Without them `cargo build -p wt-backend` fails during resolution even
-  though this crate doesn't use Rune. Until the root gets them, build with
-  `--config "patch.crates-io.<crate>.git='https://github.com/anomalyco/rune'"` (plus a matching
-  `rev`) for each of: `wgpu-hal naga winit sctk-adwaita parley_engine accesskit_windows
-  accesskit_atspi_common accesskit_macos`.
-- The root's `rune` dependency tracks `branch = "dev"`; it should pin a `rev`.
 - Unix only so far (tests use `/bin/sh`); Windows ConPTY paths in portable-pty are untested.
