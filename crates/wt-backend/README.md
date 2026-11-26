@@ -30,9 +30,15 @@ Extras: `PtySpec::{new, arg, args, cwd, env, size}` builders and `Default`
 - `writer()` handles never block: each `write` queues its bytes, in order, to a
   `wt-pty-write` thread, so a big paste into a program that stopped reading can't freeze the
   UI. One `write_all` is one message, so pastes from different handles don't interleave.
-  After the `Pty` is dropped (or the pty write fails), writes return `BrokenPipe`.
+  After the `Pty` is dropped (or the pty write fails), writes return `BrokenPipe`. `flush()`
+  is a no-op and doesn't confirm delivery (waiting would be the blocking this avoids).
+  Dropping the `Pty` types nothing into the child (portable-pty's own writer sends `\n` + EOF
+  on drop, which would run a half-typed shell command), and a write stalled on a full tty
+  queue is abandoned within 100 ms, so the master fd is released.
+- On Unix the master is `O_NONBLOCK`; `reader()` still blocks like a normal `Read`.
 - `kill()` sends `SIGHUP`, then `SIGKILL` 2 s later if the child is still running; it
-  returns at once. Dropping the `Pty` does the same, like closing a Windows Terminal pane,
+  returns at once. Signals are only sent while the child is unreaped, so they can't hit a
+  recycled pid. Dropping the `Pty` does the same, like closing a Windows Terminal pane,
   and also stops the read-pump even if a background grandchild still holds the pty.
 
 ## Consumption model (what wt-app polls)
@@ -87,7 +93,8 @@ cat, concurrent and non-blocking writers, raw `reader()`, initial size and `resi
 (checked with `stty size`), exit codes, ^D EOF, kill (including a `SIGHUP`-ignoring child),
 a grandchild holding the PTY (both for `Exited` and for releasing the pump on drop),
 env/cwd/TERM, default shell, spawn failures, `is_closed` not losing events, waker
-coalescing, and drop killing the child.
+coalescing, drop killing the child, drop typing nothing into the shell, and drop
+releasing a writer stalled on a full tty queue.
 
 ## Notes for siblings
 

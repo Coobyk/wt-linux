@@ -376,3 +376,45 @@ fn writer_fails_after_drop() {
         std::thread::sleep(Duration::from_millis(10));
     }
 }
+
+#[test]
+fn drop_types_nothing_into_the_shell() {
+    let marker = std::env::temp_dir().join(format!("wt-backend-submit-{}", std::process::id()));
+    let _ = std::fs::remove_file(&marker);
+    let script = format!("trap '' HUP; read l && echo \"$l\" > '{}'", marker.display());
+    let pty = Pty::spawn(sh(&script)).unwrap();
+    let exit = pty.exit.clone();
+    // Hold a master fd so the tty doesn't hang up (and discard input) when the Pty goes.
+    let _keep = pty.reader();
+    std::thread::sleep(Duration::from_millis(200));
+    pty.writer().write_all(b"half-typed").unwrap();
+    std::thread::sleep(Duration::from_millis(100));
+    drop(pty);
+    exit.wait_timeout(TIMEOUT).expect("child not killed");
+    assert!(!marker.exists(), "dropping the pty submitted the pending line");
+}
+
+#[test]
+fn drop_releases_a_stalled_writer() {
+    // A HUP-immune grandchild keeps the slave open and never reads, so the 1 MiB paste
+    // stalls. Once every master fd closes the tty hangs up, `stty` fails and it leaves.
+    let marker = std::env::temp_dir().join(format!("wt-backend-hangup-{}", std::process::id()));
+    let _ = std::fs::remove_file(&marker);
+    let script = format!(
+        "stty -icanon -echo; exec 3<&0; (trap '' HUP; while stty size <&3 >/dev/null 2>&1; \
+         do sleep 0.05; done; touch '{}') & sleep 30",
+        marker.display()
+    );
+    let pty = Pty::spawn(sh(&script)).unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    pty.writer().write_all(&vec![b'x'; 1 << 20]).unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(!marker.exists(), "grandchild lost the tty before drop");
+    drop(pty);
+    let deadline = Instant::now() + TIMEOUT;
+    while !marker.exists() {
+        assert!(Instant::now() < deadline, "pty master still open after drop");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let _ = std::fs::remove_file(&marker);
+}

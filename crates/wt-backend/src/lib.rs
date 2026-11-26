@@ -5,6 +5,8 @@
 //! thread that forwards output into a `std::sync::mpsc` channel, then drain
 //! [`PtyEvents`] from the app's `poll`. See the crate README for the full model.
 
+#[cfg(unix)]
+mod fd;
 mod pump;
 
 use std::io::{self, Read, Write};
@@ -16,7 +18,9 @@ use std::thread;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use portable_pty::{ChildKiller, CommandBuilder, MasterPty, PtySize, native_pty_system};
+#[cfg(not(unix))]
+use portable_pty::ChildKiller;
+use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 
 pub use portable_pty::ExitStatus;
 pub use pump::{PtyEvent, PtyEvents};
@@ -120,9 +124,29 @@ impl PtySpec {
 pub(crate) struct ExitCell {
     status: Mutex<Option<ExitStatus>>,
     cond: Condvar,
+    /// Set (under this lock) once the child is a zombie and before it is reaped, so a
+    /// signal sent while holding it can never reach a recycled pid.
+    #[cfg(unix)]
+    dead: Mutex<bool>,
 }
 
 impl ExitCell {
+    #[cfg(unix)]
+    fn mark_dead(&self) {
+        *self.dead.lock().unwrap() = true;
+    }
+
+    /// Signal the child unless it has already exited.
+    #[cfg(unix)]
+    fn signal(&self, pid: u32, sig: libc::c_int) -> io::Result<()> {
+        let dead = self.dead.lock().unwrap();
+        // SAFETY: plain kill(2); `dead` is false, so `pid` is still our unreaped child.
+        if !*dead && unsafe { libc::kill(pid as libc::pid_t, sig) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
     fn set(&self, status: ExitStatus) {
         *self.status.lock().unwrap() = Some(status);
         self.cond.notify_all();
@@ -156,6 +180,7 @@ impl ExitCell {
 pub struct Pty {
     master: Mutex<Box<dyn MasterPty + Send>>,
     writer: Sender<WriteMsg>,
+    #[cfg(not(unix))]
     killer: Mutex<Box<dyn ChildKiller + Send + Sync>>,
     exit: Arc<ExitCell>,
     pid: Option<u32>,
@@ -175,8 +200,19 @@ impl Pty {
         let pair = native_pty_system()
             .openpty(pty_size(spec.cols, spec.rows))
             .context("openpty failed")?;
+        let closing = Arc::new(AtomicBool::new(false));
         // Everything fallible that doesn't need the child happens before it exists.
-        let writer = start_writer(pair.master.take_writer().context("pty writer")?)?;
+        #[cfg(unix)]
+        let w: Box<dyn Write + Send> = {
+            fd::set_nonblocking(&*pair.master)?;
+            Box::new(fd::MasterWriter {
+                file: fd::dup_master(&*pair.master)?,
+                closing: closing.clone(),
+            })
+        };
+        #[cfg(not(unix))]
+        let w = pair.master.take_writer().context("pty writer")?;
+        let writer = start_writer(w)?;
         let mut child = pair
             .slave
             .spawn_command(spec.command())
@@ -185,12 +221,19 @@ impl Pty {
         drop(pair.slave);
 
         let pid = child.process_id();
+        #[cfg(not(unix))]
         let killer = child.clone_killer();
         let exit = Arc::new(ExitCell::default());
         let cell = exit.clone();
         let waiter = thread::Builder::new()
             .name("wt-pty-wait".into())
             .spawn(move || {
+                #[cfg(unix)]
+                if let Some(pid) = pid {
+                    wait_until_dead(pid);
+                }
+                #[cfg(unix)]
+                cell.mark_dead();
                 let status = child
                     .wait()
                     .unwrap_or_else(|_| ExitStatus::with_exit_code(1));
@@ -207,11 +250,12 @@ impl Pty {
         Ok(Pty {
             master: Mutex::new(pair.master),
             writer,
+            #[cfg(not(unix))]
             killer: Mutex::new(killer),
             exit,
             pid,
             pumped: AtomicBool::new(false),
-            closing: Arc::new(AtomicBool::new(false)),
+            closing,
         })
     }
 
@@ -219,7 +263,13 @@ impl Pty {
     /// share one stream, so don't mix this with [`Pty::pump`]. Reads return `Ok(0)` (or an
     /// `EIO` error on Linux) once the child side is closed.
     pub fn reader(&self) -> Box<dyn Read + Send> {
-        match self.master.lock().unwrap().try_clone_reader() {
+        let master = self.master.lock().unwrap();
+        #[cfg(unix)]
+        let reader = fd::dup_master(&**master)
+            .map(|f| Box::new(fd::BlockingReader(f)) as Box<dyn Read + Send>);
+        #[cfg(not(unix))]
+        let reader = master.try_clone_reader();
+        match reader {
             Ok(r) => r,
             Err(e) => Box::new(FailedReader(Some(io::Error::other(e)))),
         }
@@ -228,7 +278,8 @@ impl Pty {
     /// A handle that writes to the child's stdin (keystrokes, pastes). Writes never block:
     /// bytes are queued, in order, to a writer thread, so a paste into a program that has
     /// stopped reading can't freeze the UI. Handles may be used from any thread. Once the
-    /// child side is gone (or the `Pty` dropped), writes fail with `BrokenPipe`.
+    /// child side is gone (or the `Pty` dropped), writes fail with `BrokenPipe`. `flush` is a
+    /// no-op: it doesn't wait for queued bytes, since that is exactly the blocking this avoids.
     pub fn writer(&self) -> Box<dyn Write + Send> {
         Box::new(PtyWriter(self.writer.clone()))
     }
@@ -273,16 +324,17 @@ impl Pty {
         if self.child_exited().is_some() {
             return Ok(());
         }
+        #[cfg(not(unix))]
         self.killer.lock().unwrap().kill().context("kill child")?;
         #[cfg(unix)]
         if let Some(pid) = self.pid {
+            self.exit.signal(pid, libc::SIGHUP).context("kill child")?;
             let exit = self.exit.clone();
             let _ = thread::Builder::new()
                 .name("wt-pty-kill".into())
                 .spawn(move || {
                     if exit.wait_timeout(KILL_GRACE).is_none() {
-                        // The waiter thread hasn't reaped the child, so the pid can't be reused yet.
-                        unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+                        let _ = exit.signal(pid, libc::SIGKILL);
                     }
                 });
         }
@@ -354,6 +406,26 @@ impl Write for PtyWriter {
 
     fn flush(&mut self) -> io::Result<()> {
         Ok(())
+    }
+}
+
+/// Block until `pid` has exited, without reaping it (the pid stays reserved).
+#[cfg(unix)]
+fn wait_until_dead(pid: u32) {
+    loop {
+        // SAFETY: waitid with a zeroed out-param it fills in.
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        let r = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                pid as libc::id_t,
+                &mut info,
+                libc::WEXITED | libc::WNOWAIT,
+            )
+        };
+        if r == 0 || io::Error::last_os_error().kind() != io::ErrorKind::Interrupted {
+            return;
+        }
     }
 }
 

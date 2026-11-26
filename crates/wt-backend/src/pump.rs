@@ -18,9 +18,6 @@ const READ_CHUNK: usize = 64 * 1024;
 /// background grandchild may hold the pty open forever.
 const DRAIN_SLICE: Duration = Duration::from_millis(250);
 const DRAIN_MAX: Duration = Duration::from_secs(3);
-/// How often a blocked reader checks whether its `Pty` was dropped.
-#[cfg(unix)]
-const CLOSE_POLL_MS: i32 = 100;
 
 /// One message from the pump.
 #[derive(Debug, Clone)]
@@ -129,13 +126,7 @@ pub(crate) type Source = Box<dyn Read + Send>;
 
 #[cfg(unix)]
 pub(crate) fn source(master: &dyn MasterPty) -> Result<Source> {
-    use std::os::fd::BorrowedFd;
-    let fd = master.as_raw_fd().context("pty master has no fd")?;
-    // SAFETY: `fd` is owned by `master`, which is borrowed (and so open) for this call.
-    let owned = unsafe { BorrowedFd::borrow_raw(fd) }
-        .try_clone_to_owned()
-        .context("dup pty fd")?;
-    Ok(std::fs::File::from(owned))
+    crate::fd::dup_master(master)
 }
 
 #[cfg(not(unix))]
@@ -187,10 +178,14 @@ fn read_loop(mut src: Source, closing: &AtomicBool, tx: &Sender<PtyEvent>, share
             return;
         }
         #[cfg(unix)]
-        match readable(&src) {
-            Readiness::Ready => {}
-            Readiness::Timeout => continue,
-            Readiness::Failed => return,
+        {
+            use crate::fd::{CLOSE_POLL_MS, Readiness, poll};
+            use std::os::fd::AsRawFd;
+            match poll(src.as_raw_fd(), libc::POLLIN, CLOSE_POLL_MS) {
+                Readiness::Ready => {}
+                Readiness::Timeout => continue,
+                Readiness::Failed => return,
+            }
         }
         match src.read(&mut buf) {
             Ok(0) => return,
@@ -201,36 +196,12 @@ fn read_loop(mut src: Source, closing: &AtomicBool, tx: &Sender<PtyEvent>, share
                 }
                 shared.wake();
             }
-            Err(e) if e.kind() == ErrorKind::Interrupted => continue,
+            Err(e) if matches!(e.kind(), ErrorKind::Interrupted | ErrorKind::WouldBlock) => {
+                continue;
+            }
             // Linux reports a closed slave as EIO; any error ends the stream.
             Err(_) => return,
         }
-    }
-}
-
-#[cfg(unix)]
-enum Readiness {
-    Ready,
-    Timeout,
-    Failed,
-}
-
-#[cfg(unix)]
-fn readable(src: &std::fs::File) -> Readiness {
-    use std::os::fd::AsRawFd;
-    let mut pfd = libc::pollfd {
-        fd: src.as_raw_fd(),
-        events: libc::POLLIN,
-        revents: 0,
-    };
-    // SAFETY: one valid pollfd, owned by this frame.
-    let r = unsafe { libc::poll(&mut pfd, 1, CLOSE_POLL_MS) };
-    match r {
-        0 => Readiness::Timeout,
-        // POLLHUP/POLLERR also land here; the read that follows reports them.
-        n if n > 0 => Readiness::Ready,
-        _ if std::io::Error::last_os_error().kind() == ErrorKind::Interrupted => Readiness::Timeout,
-        _ => Readiness::Failed,
     }
 }
 
