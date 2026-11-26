@@ -12,7 +12,7 @@ use std::io::{Read, Write};
 use std::process::ExitStatus;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError};
 
 use crate::config::ResolvedProfile;
 use crate::contract::{Pty, PtySpec, Terminal};
@@ -21,6 +21,9 @@ pub type Notify = Arc<dyn Fn() + Send + Sync>;
 
 /// Bytes fed per `drain`, so a flood (`cat bigfile`) can't stall a frame.
 pub const DRAIN_BUDGET: usize = 1 << 20;
+
+/// Chunks (up to 64 KiB each) queued before the pump blocks, applying backpressure to the child.
+const QUEUE_CHUNKS: usize = 64;
 
 pub struct Session {
     pub title: String,
@@ -58,7 +61,7 @@ impl Session {
             cols,
             rows,
         })?;
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = mpsc::sync_channel(QUEUE_CHUNKS);
         let pending = Arc::new(AtomicBool::new(false));
         let reader = pty.reader();
         let flag = pending.clone();
@@ -138,7 +141,7 @@ impl Session {
 
 fn pump(
     mut reader: Box<dyn Read + Send>,
-    tx: mpsc::Sender<Vec<u8>>,
+    tx: SyncSender<Vec<u8>>,
     pending: Arc<AtomicBool>,
     notify: Notify,
 ) {
