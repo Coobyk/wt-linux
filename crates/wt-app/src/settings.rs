@@ -1,6 +1,9 @@
 //! The settings tab: startup, appearance, profiles, colour schemes and the keymap.
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use rune::tok::type_;
-use rune::{El, Tx, col, el, row, text};
+use rune::{El, ScrollSpec, Tx, col, el, row, text};
 
 use crate::action::Action;
 use crate::app::{SETTINGS_SECTIONS, SettingsSection, State};
@@ -109,7 +112,8 @@ pub fn settings_view(s: &State, th: &Chrome) -> El {
                 .min_w(0.0)
                 .padding(24.0)
                 .gap(6.0)
-                .clip_rounded(0.0)
+                .min_h(0.0)
+                .scroll(ScrollSpec::default())
                 .child(body),
         )
 }
@@ -163,12 +167,21 @@ fn save(s: &mut State) {
         s.status = Some("No config path; set $XDG_CONFIG_HOME or $HOME".into());
         return;
     };
+    static REQUESTED: AtomicU64 = AtomicU64::new(0);
+    static WRITTEN: Mutex<u64> = Mutex::new(0);
+    let seq = REQUESTED.fetch_add(1, Ordering::Relaxed) + 1;
     let cfg = s.config.clone();
     s.status = Some(format!("Saving to {}", path.display()));
     std::thread::spawn(move || {
+        // Writes are serialized and a save older than the last written one is dropped.
+        let mut written = WRITTEN.lock().unwrap_or_else(|e| e.into_inner());
+        if seq < *written {
+            return;
+        }
         if let Err(e) = cfg.save(&path) {
             eprintln!("wt-linux: saving {}: {e:#}", path.display());
         }
+        *written = seq;
     });
 }
 
@@ -187,8 +200,10 @@ fn appearance(s: &State, th: &Chrome) -> El {
         .gap(6.0)
         .center_y()
         .child(
-            button("font-size-down", "−", false, th)
-                .on_press(|s: &mut State| s.config.font.size = (s.config.font.size - 1.0).max(6.0)),
+            button("font-size-down", "−", false, th).on_press(|s: &mut State| {
+                s.config.font.size = (s.config.font.size - 1.0).max(6.0);
+                s.refit();
+            }),
         )
         .child(
             value(format!("{} pt", s.config.font.size), th)
@@ -197,7 +212,8 @@ fn appearance(s: &State, th: &Chrome) -> El {
         )
         .child(
             button("font-size-up", "+", false, th).on_press(|s: &mut State| {
-                s.config.font.size = (s.config.font.size + 1.0).min(72.0)
+                s.config.font.size = (s.config.font.size + 1.0).min(72.0);
+                s.refit();
             }),
         );
     let zoom = row()

@@ -13,12 +13,16 @@ use crate::palette::{Palette, PaletteItem, filter};
 use crate::terminal::{PaneTerminal, SpawnSpec, TerminalFactory, fake_factory};
 
 pub const INITIAL_COLS: u16 = 80;
+/// Palette rows shown; matches past this are neither drawn nor selectable.
+pub const PALETTE_ROWS: usize = 12;
 pub const INITIAL_ROWS: u16 = 24;
 
 pub struct Pane {
     /// Index into `Config::profiles`.
     pub profile: usize,
     pub term: Box<dyn PaneTerminal>,
+    /// The content box the pane was last fitted to, for refitting when the font changes.
+    pub fit: Option<(f32, f32)>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -200,7 +204,14 @@ impl State {
         };
         let term = (self.factory)(&spec);
         let id = self.id();
-        self.panes.insert(id, Pane { profile, term });
+        self.panes.insert(
+            id,
+            Pane {
+                profile,
+                term,
+                fit: None,
+            },
+        );
         id
     }
 
@@ -403,7 +414,11 @@ impl State {
 
     pub fn palette_matches(&self) -> Vec<PaletteItem> {
         match &self.mode {
-            Mode::Palette(p) => filter(&self.palette_items(), &p.query.text),
+            Mode::Palette(p) => {
+                let mut m = filter(&self.palette_items(), &p.query.text);
+                m.truncate(PALETTE_ROWS);
+                m
+            }
             _ => Vec::new(),
         }
     }
@@ -467,9 +482,18 @@ impl State {
                 return Effect::Focus("palette-input");
             }
             Action::OpenSettings => self.open_settings(),
-            Action::FontSizeIncrease => self.font_delta = (self.font_delta + 1.0).min(48.0),
-            Action::FontSizeDecrease => self.font_delta = (self.font_delta - 1.0).max(-8.0),
-            Action::FontSizeReset => self.font_delta = 0.0,
+            Action::FontSizeIncrease => {
+                self.font_delta = (self.font_delta + 1.0).min(48.0);
+                self.refit();
+            }
+            Action::FontSizeDecrease => {
+                self.font_delta = (self.font_delta - 1.0).max(-8.0);
+                self.refit();
+            }
+            Action::FontSizeReset => {
+                self.font_delta = 0.0;
+                self.refit();
+            }
             Action::Quit => return Effect::Quit,
         }
         Effect::None
@@ -501,7 +525,20 @@ impl State {
         let cols = ((w / cw).floor() as u16).max(2);
         let rows = ((h / lh).floor() as u16).max(1);
         if let Some(p) = self.panes.get_mut(&pane) {
+            p.fit = Some((w, h));
             p.term.resize(cols, rows);
+        }
+    }
+
+    /// Refits every laid-out pane, after the font size changes.
+    pub fn refit(&mut self) {
+        let fits: Vec<_> = self
+            .panes
+            .iter()
+            .filter_map(|(id, p)| p.fit.map(|(w, h)| (*id, w, h)))
+            .collect();
+        for (id, w, h) in fits {
+            self.fit_pane(id, w, h);
         }
     }
 

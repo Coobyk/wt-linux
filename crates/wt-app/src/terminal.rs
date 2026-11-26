@@ -253,8 +253,15 @@ impl FakeTerminal {
     }
 
     fn backspace(&mut self) {
-        if self.line.pop().is_some() && self.cursor.col > 0 {
-            self.cursor.col -= 1;
+        if self.line.pop().is_some() {
+            if self.cursor.col > 0 {
+                self.cursor.col -= 1;
+            } else if self.cursor.row > 0 {
+                self.cursor.row -= 1;
+                self.cursor.col = self.grid.cols - 1;
+            } else {
+                return;
+            }
             let at = self.cursor.row as usize * self.grid.cols as usize + self.cursor.col as usize;
             self.grid.cells[at] = Cell::default();
         }
@@ -382,5 +389,20 @@ mod tests {
         assert_eq!((t.grid().cols, t.grid().rows), (20, 3));
         assert_eq!(t.cursor().row, 2);
         assert!(t.grid().row_text(2).starts_with("user@wt-linux"));
+    }
+
+    #[test]
+    fn backspace_unwraps_to_the_previous_row() {
+        let mut t = FakeTerminal::new(&spec());
+        let row = t.cursor().row;
+        let fill = 40 - t.cursor().col as usize;
+        t.write("a".repeat(fill).as_bytes());
+        t.write(b"b");
+        assert_eq!((t.cursor().row, t.cursor().col), (row + 1, 1));
+        t.write(b"\x7f\x7f");
+        assert_eq!((t.cursor().row, t.cursor().col), (row, 39));
+        assert_eq!(t.grid().row_text(row).trim_end().chars().count(), 39);
+        assert!(t.grid().row_text(row + 1).trim().is_empty());
+        assert_eq!(t.pending_line(), "a".repeat(fill - 1));
     }
 }

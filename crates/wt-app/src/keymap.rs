@@ -83,7 +83,7 @@ impl Keymap {
 
     /// Binds `key` to `action`, taking the chord from any other action.
     pub fn bind(&mut self, action: Action, key: &str) -> Result<(), rune::ChordError> {
-        let chord = Chord::parse(key)?;
+        let chord = Chord::parse(&canonical(key))?;
         self.bindings.retain(|b| b.chord != chord);
         self.bindings.push(Binding {
             chord,
@@ -115,6 +115,23 @@ impl Keymap {
     pub fn bindings(&self) -> &[Binding] {
         &self.bindings
     }
+}
+
+/// `mod` spelled as the key it is on this platform, so `mod+t` and `ctrl+t` are one chord.
+fn canonical(spec: &str) -> String {
+    if cfg!(target_os = "macos") {
+        return spec.to_string();
+    }
+    spec.split('+')
+        .map(|t| {
+            if t.trim().eq_ignore_ascii_case("mod") {
+                "ctrl"
+            } else {
+                t
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("+")
 }
 
 /// "ctrl+shift+t" -> "Ctrl+Shift+T".
@@ -224,5 +241,23 @@ mod tests {
     fn pretty_labels() {
         assert_eq!(pretty("ctrl+shift+t"), "Ctrl+Shift+T");
         assert_eq!(pretty("ctrl++"), "Ctrl++");
+    }
+
+    #[test]
+    #[cfg(not(target_os = "macos"))]
+    fn mod_alias_takes_the_ctrl_chord() {
+        let mut k = Keymap::defaults();
+        k.bind(Action::Quit, "mod+shift+t").unwrap();
+        assert!(k.keys_for(Action::NewTab).is_empty());
+        let ev = KeyEvent {
+            key: Key::Command('t'),
+            mods: Mods {
+                ctrl: true,
+                cmd: true,
+                shift: true,
+                ..Mods::default()
+            },
+        };
+        assert_eq!(k.action_for(&ev, None), Some(Action::Quit));
     }
 }

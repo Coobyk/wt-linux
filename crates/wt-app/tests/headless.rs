@@ -2,7 +2,7 @@
 //! dispatch through the runtime, and a PNG render of the split scene.
 use wt_app::rune::render::{Gpu, OFFSCREEN_FORMAT, Offscreen, Renderer, write_png};
 use wt_app::rune::{App, Env, Key, KeyEvent, Mods, Runtime};
-use wt_app::{Action, SCENES, State, spec};
+use wt_app::{SCENES, State, spec};
 
 const SIZE: (f32, f32) = (1100.0, 680.0);
 
@@ -105,9 +105,6 @@ fn keymap_drives_the_runtime() {
             shift: true,
             ..Mods::default()
         },
-    });
-    rt.update(|s, _| {
-        s.dispatch(Action::SplitVertical);
     });
     rt.frame(0.0);
     assert!(keys(&rt).iter().any(|k| k.starts_with("divider-")));

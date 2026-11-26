@@ -79,15 +79,7 @@ fn icon_button(key: impl Into<String>, label: &str, th: &Chrome) -> El {
 }
 
 fn tab_bar(s: &State, th: &Chrome) -> El {
-    let mut bar = row()
-        .key("tab-bar")
-        .w_full()
-        .h(TAB_BAR_H)
-        .fill(th.tab_bar)
-        .px(8.0)
-        .pt(6.0)
-        .gap(2.0)
-        .items_end();
+    let mut strip = row().key("tab-strip").h_full().gap(2.0).items_end();
     for (i, tab) in s.tabs.iter().enumerate() {
         let id = tab.id;
         let active = i == s.active;
@@ -127,9 +119,7 @@ fn tab_bar(s: &State, th: &Chrome) -> El {
             .center()
             .radius(4.0)
             .hover_fill(th.tab_hover)
-            .on_press(move |s: &mut State| {
-                s.close_tab_id(id);
-            })
+            .on_press_tx(move |s: &mut State, tx: &mut Tx| apply(s.close_tab_id(id), tx))
             .child(text("×").font(type_::BODY).color(th.text_dim));
         let mut t = row()
             .key(format!("tab-{id}"))
@@ -144,9 +134,7 @@ fn tab_bar(s: &State, th: &Chrome) -> El {
             .justify_between()
             .corners([8.0, 8.0, 0.0, 0.0])
             .on_press(move |s: &mut State| s.activate(i))
-            .on_double_press(move |s: &mut State| {
-                s.start_rename(i);
-            })
+            .on_double_press_tx(move |s: &mut State, tx: &mut Tx| apply(s.start_rename(i), tx))
             .child(title)
             .child(close);
         t = if active {
@@ -154,28 +142,45 @@ fn tab_bar(s: &State, th: &Chrome) -> El {
         } else {
             t.hover_fill(th.tab_hover)
         };
-        bar = bar.child(t);
+        strip = strip.child(t);
     }
-    bar.child(
-        row()
-            .h(TAB_BAR_H - 6.0)
-            .center_y()
-            .gap(2.0)
-            .pl(4.0)
-            .child(
-                icon_button("new-tab", "+", th)
-                    .on_press_tx(|s: &mut State, tx: &mut Tx| run_action(s, Action::NewTab, tx)),
-            )
-            .child(
-                icon_button("profiles-button", "⌄", th).on_press(|s: &mut State| {
-                    s.mode = if matches!(s.mode, Mode::ProfileMenu) {
-                        Mode::Normal
-                    } else {
-                        Mode::ProfileMenu
-                    };
-                }),
-            ),
-    )
+    let strip = row()
+        .key("tab-scroll")
+        .h_full()
+        .min_w(0.0)
+        .shrink()
+        .scroll_x()
+        .child(strip);
+    row()
+        .key("tab-bar")
+        .w_full()
+        .h(TAB_BAR_H)
+        .fill(th.tab_bar)
+        .px(8.0)
+        .pt(6.0)
+        .items_end()
+        .child(strip)
+        .child(
+            row()
+                .h(TAB_BAR_H - 6.0)
+                .center_y()
+                .gap(2.0)
+                .pl(4.0)
+                .child(
+                    icon_button("new-tab", "+", th).on_press_tx(|s: &mut State, tx: &mut Tx| {
+                        run_action(s, Action::NewTab, tx)
+                    }),
+                )
+                .child(
+                    icon_button("profiles-button", "⌄", th).on_press(|s: &mut State| {
+                        s.mode = if matches!(s.mode, Mode::ProfileMenu) {
+                            Mode::Normal
+                        } else {
+                            Mode::ProfileMenu
+                        };
+                    }),
+                ),
+        )
 }
 
 fn profile_menu(s: &State, th: &Chrome) -> El {
@@ -410,7 +415,7 @@ fn palette_view(s: &State, cx: &mut Cx<State>, th: &Chrome) -> El {
         .label("Commands")
         .w_full()
         .gap(1.0);
-    for (i, item) in matches.iter().take(12).enumerate() {
+    for (i, item) in matches.iter().enumerate() {
         let r = row()
             .key(format!("palette-item-{i}"))
             .role("option")
