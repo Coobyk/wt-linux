@@ -112,6 +112,11 @@ impl State {
         }
     }
 
+    /// The active tab's colour scheme (the first profile's while no tab is open).
+    fn scheme(&self) -> &ColorScheme {
+        self.tabs.active().map_or(&self.scheme, |s| &s.profile.color_scheme)
+    }
+
     fn fit(&mut self, rect: [f32; 4]) {
         self.screen = Some(rect);
         let (cw, ch) = self.cell();
@@ -167,8 +172,8 @@ fn color(hex: &str, fallback: &str) -> Color {
 }
 
 fn view(s: &State, _cx: &mut Cx<State>) -> El {
-    let fg = color(&s.scheme.foreground, "#cccccc");
-    let bg = color(&s.scheme.background, "#0c0c0c");
+    let fg = color(&s.scheme().foreground, "#cccccc");
+    let bg = color(&s.scheme().background, "#0c0c0c");
     let tab_style = TextStyle::new(12.0, 500.0);
     let mut bar = row()
         .key("tabs")
@@ -231,7 +236,7 @@ fn view(s: &State, _cx: &mut Cx<State>) -> El {
             text(format!("wt: {e}"))
                 .key("error")
                 .font(TextStyle::new(s.font_size, 400.0).mono())
-                .color(color(&s.scheme.palette[9], "#e74856")),
+                .color(color(&s.scheme().palette[9], "#e74856")),
         );
     }
     if let Some(sess) = s.tabs.active() {
@@ -261,7 +266,7 @@ fn terminal_view(s: &State, sess: &Session, fg: Color) -> El {
         if cur.visible && cur.row == r && !sess.is_finished() {
             let mut chars: Vec<char> = line.chars().collect();
             chars.resize(chars.len().max(cur.col as usize + 1), ' ');
-            chars[cur.col as usize] = match s.cursor_shape {
+            chars[cur.col as usize] = match sess.profile.cursor_shape {
                 CursorShape::Block => '█',
                 CursorShape::Bar => '▏',
                 CursorShape::Underline => '▁',
