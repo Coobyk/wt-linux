@@ -596,8 +596,20 @@ pub fn apply(effect: Effect, tx: &mut Tx) {
 }
 
 pub fn run_action(s: &mut State, a: Action, tx: &mut Tx) {
-    let e = s.dispatch(a);
+    revealing(s, tx, |s| ((), s.dispatch(a)));
+}
+
+/// Runs `f`, applies its effect, and scrolls the tab strip to the active tab if it changed.
+pub fn revealing<T>(s: &mut State, tx: &mut Tx, f: impl FnOnce(&mut State) -> (T, Effect)) -> T {
+    let before = s.active_tab().map(|t| t.id);
+    let (out, e) = f(s);
     apply(e, tx);
+    if let Some(id) = s.active_tab().map(|t| t.id)
+        && Some(id) != before
+    {
+        tx.scroll_into_view_in("tab-scroll", format!("tab-{id}"));
+    }
+    out
 }
 
 /// Font family names live for the process; `Family::Named` needs `&'static str`.

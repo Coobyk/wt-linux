@@ -122,16 +122,21 @@ fn canonical(spec: &str) -> String {
     if cfg!(target_os = "macos") {
         return spec.to_string();
     }
-    spec.split('+')
-        .map(|t| {
-            if t.trim().eq_ignore_ascii_case("mod") {
-                "ctrl"
-            } else {
-                t
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("+")
+    let mut parts: Vec<&str> = spec.split('+').collect();
+    let key = parts.pop().unwrap_or_default();
+    let is = |t: &str, m: &str| t.trim().eq_ignore_ascii_case(m);
+    let Some(at) = parts.iter().position(|t| is(t, "mod")) else {
+        return spec.to_string();
+    };
+    // `mod` is Ctrl here: every `mod` collapses into one `ctrl`; other repeats are left for
+    // Rune to reject.
+    let has_ctrl = parts.iter().any(|t| is(t, "ctrl"));
+    parts.retain(|t| !is(t, "mod"));
+    if !has_ctrl {
+        parts.insert(at, "ctrl");
+    }
+    parts.push(key);
+    parts.join("+")
 }
 
 /// "ctrl+shift+t" -> "Ctrl+Shift+T".
@@ -241,6 +246,17 @@ mod tests {
     fn pretty_labels() {
         assert_eq!(pretty("ctrl+shift+t"), "Ctrl+Shift+T");
         assert_eq!(pretty("ctrl++"), "Ctrl++");
+    }
+
+    #[test]
+    #[cfg(not(target_os = "macos"))]
+    fn mod_and_ctrl_together_still_bind() {
+        let mut k = Keymap::defaults();
+        k.bind(Action::Quit, "mod+ctrl+q").unwrap();
+        assert_eq!(k.keys_for(Action::Quit), ["mod+ctrl+q"]);
+        assert_eq!(canonical("ctrl+mod++"), "ctrl++");
+        assert_eq!(canonical("mod+mod+shift+t"), "ctrl+shift+t");
+        assert!(k.bind(Action::Quit, "ctrl+shift+shift+t").is_err());
     }
 
     #[test]

@@ -3,7 +3,7 @@ use rune::tok::type_;
 use rune::{Align, Cursor, Cx, El, Key, KeyEvent, Phase, Side, Tx, col, el, row, text, text_input};
 
 use crate::action::Action;
-use crate::app::{Mode, State, TabKind, apply, run_action};
+use crate::app::{Mode, State, TabKind, apply, revealing, run_action};
 use crate::chrome::Chrome;
 use crate::grid_view::{GridLook, grid_view};
 use crate::layout::{Layout, PaneId, Split};
@@ -58,8 +58,7 @@ fn keymap_only(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
 /// `AppSpec::on_key`: keymap, then typing into the focused pane.
 pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
     let (handled, effect) = s.handle_key(ev, Some(tx));
-    apply(effect, tx);
-    handled
+    revealing(s, tx, |_| (handled, effect))
 }
 
 /// `AppSpec::poll`.
@@ -397,7 +396,7 @@ fn palette_view(s: &State, cx: &mut Cx<State>, th: &Chrome) -> El {
         .fill(th.input)
         .border(1.0, th.accent)
         .on_edit(|s: &mut State| s.mode_edit())
-        .on_submit(|s: &mut State, tx: &mut Tx| apply(s.palette_run(None), tx))
+        .on_submit(|s: &mut State, tx: &mut Tx| revealing(s, tx, |s| ((), s.palette_run(None))))
         .on_input_key(|s: &mut State, ev: &KeyEvent, _: &mut Tx| match ev.key {
             Key::Up => {
                 s.palette_move(-1);
@@ -427,7 +426,9 @@ fn palette_view(s: &State, cx: &mut Cx<State>, th: &Chrome) -> El {
             .justify_between()
             .radius(4.0)
             .hover_fill(th.selected)
-            .on_press_tx(move |s: &mut State, tx: &mut Tx| apply(s.palette_run(Some(i)), tx))
+            .on_press_tx(move |s: &mut State, tx: &mut Tx| {
+                revealing(s, tx, |s| ((), s.palette_run(Some(i))))
+            })
             .child(
                 text(item.label.clone())
                     .font(type_::BODY)
