@@ -24,6 +24,7 @@ mod grid;
 mod shim;
 
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use alacritty_terminal::event::{Event, EventListener, WindowSize};
 use alacritty_terminal::grid::Dimensions;
@@ -51,6 +52,37 @@ impl EventListener for Listener {
 struct Size {
     cols: usize,
     rows: usize,
+}
+
+impl Size {
+    fn clamped(cols: u16, rows: u16) -> Self {
+        Self {
+            cols: cols.max(2) as usize,
+            rows: rows.max(1) as usize,
+        }
+    }
+}
+
+/// `base` with the terminal's OSC 4/10/11/12 overrides applied.
+pub(crate) fn effective_palette(term: &Term<Listener>, base: &Palette) -> Palette {
+    let mut p = *base;
+    let c = term.colors();
+    let conv = |rgb: ansi::Rgb| Rgb::new(rgb.r, rgb.g, rgb.b);
+    for i in 0..256 {
+        if let Some(rgb) = c[i] {
+            p.colors[i] = conv(rgb);
+        }
+    }
+    if let Some(rgb) = c[NamedColor::Foreground] {
+        p.foreground = conv(rgb);
+    }
+    if let Some(rgb) = c[NamedColor::Background] {
+        p.background = conv(rgb);
+    }
+    if let Some(rgb) = c[NamedColor::Cursor] {
+        p.cursor = conv(rgb);
+    }
+    p
 }
 
 impl Dimensions for Size {
@@ -200,23 +232,22 @@ pub struct Terminal {
     events: Vec<TermEvent>,
     title: Option<String>,
     cell_px: Option<(u16, u16)>,
+    config: term::Config,
+    full_damage: bool,
 }
 
 impl Terminal {
     /// `scrollback` is the maximum number of history lines kept for the primary screen.
-    /// `cols`/`rows` are clamped to at least 1 (alacritty requires a non-empty grid).
+    /// `cols` is clamped to at least 2 (room for one wide character) and `rows` to at least 1.
     pub fn new(cols: u16, rows: u16, scrollback: usize) -> Self {
         let listener = Listener::default();
         let config = term::Config {
             scrolling_history: scrollback,
             ..Default::default()
         };
-        let size = Size {
-            cols: cols.max(1) as usize,
-            rows: rows.max(1) as usize,
-        };
+        let size = Size::clamped(cols, rows);
         Self {
-            term: Term::new(config, &size, listener.clone()),
+            term: Term::new(config.clone(), &size, listener.clone()),
             parser: ansi::Processor::new(),
             listener,
             palette: Palette::default(),
@@ -224,26 +255,62 @@ impl Terminal {
             events: Vec::new(),
             title: None,
             cell_px: None,
+            config,
+            full_damage: false,
         }
     }
 
     /// Parse child output and update state. Partial escape sequences and partial UTF-8
     /// are buffered across calls, so arbitrary chunking is fine.
     pub fn feed(&mut self, bytes: &[u8]) {
+        self.flush_expired_sync_update();
         let mut shim = shim::Shim {
             term: &mut self.term,
+            listener: &self.listener,
+            palette: &self.palette,
         };
         self.parser.advance(&mut shim, bytes);
         self.drain_alacritty_events();
     }
 
+    /// Deadline of the pending synchronized update (`CSI ?2026h`), if one is buffering.
+    /// While it is pending, output is held back; the event loop should call
+    /// [`Self::flush_expired_sync_update`] once this instant passes, even if no more
+    /// bytes arrive.
+    pub fn sync_update_deadline(&self) -> Option<Instant> {
+        self.parser.sync_timeout().sync_timeout()
+    }
+
+    /// Apply a stalled synchronized update whose deadline has passed. Returns whether
+    /// anything was flushed. Also done automatically at the start of [`Self::feed`].
+    pub fn flush_expired_sync_update(&mut self) -> bool {
+        match self.sync_update_deadline() {
+            Some(deadline) if Instant::now() >= deadline => {
+                self.flush_sync_update();
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Apply any buffered synchronized update now (e.g. when the child exits mid-update).
+    pub fn flush_sync_update(&mut self) {
+        if self.sync_update_deadline().is_none() {
+            return;
+        }
+        let mut shim = shim::Shim {
+            term: &mut self.term,
+            listener: &self.listener,
+            palette: &self.palette,
+        };
+        self.parser.stop_sync(&mut shim);
+        self.drain_alacritty_events();
+    }
+
     /// Resize the grid (see the crate docs for the reflow policy). Remember to also
-    /// resize the PTY. Zero dimensions are clamped to 1.
+    /// resize the PTY. Sizes are clamped like in [`Self::new`].
     pub fn resize(&mut self, cols: u16, rows: u16) {
-        self.term.resize(Size {
-            cols: cols.max(1) as usize,
-            rows: rows.max(1) as usize,
-        });
+        self.term.resize(Size::clamped(cols, rows));
     }
 
     pub fn grid(&self) -> GridView<'_> {
@@ -348,13 +415,16 @@ impl Terminal {
     /// (`scroll > 0`), it should treat a change of `scroll` as full damage itself.
     /// Cursor movement damages both the old and new cursor cells.
     pub fn take_damage(&mut self) -> Damage {
+        let last_col = self.term.columns() - 1;
+        let full = std::mem::take(&mut self.full_damage);
         let damage = match self.term.damage() {
+            _ if full => Damage::Full,
             TermDamage::Full => Damage::Full,
             TermDamage::Partial(it) => Damage::Rows(
                 it.map(|d| RowDamage {
                     row: d.line as u16,
-                    left: d.left as u16,
-                    right: d.right as u16,
+                    left: d.left.min(last_col) as u16,
+                    right: d.right.min(last_col) as u16,
                 })
                 .collect(),
             ),
@@ -365,29 +435,29 @@ impl Terminal {
 
     /// Effective palette: the base palette with any OSC 4/10/11/12 overrides applied.
     pub fn palette(&self) -> Palette {
-        let mut p = self.palette;
-        let c = self.term.colors();
-        let conv = |rgb: ansi::Rgb| Rgb::new(rgb.r, rgb.g, rgb.b);
-        for i in 0..256 {
-            if let Some(rgb) = c[i] {
-                p.colors[i] = conv(rgb);
-            }
-        }
-        if let Some(rgb) = c[NamedColor::Foreground] {
-            p.foreground = conv(rgb);
-        }
-        if let Some(rgb) = c[NamedColor::Background] {
-            p.background = conv(rgb);
-        }
-        if let Some(rgb) = c[NamedColor::Cursor] {
-            p.cursor = conv(rgb);
-        }
-        p
+        effective_palette(&self.term, &self.palette)
     }
 
     /// Set the profile's color scheme. App OSC overrides still win over it.
+    /// The next [`Self::take_damage`] reports full damage.
     pub fn set_palette(&mut self, palette: Palette) {
         self.palette = palette;
+        self.full_damage = true;
+    }
+
+    /// Allow apps to enable the kitty keyboard protocol (`CSI > u`). Off by default:
+    /// only enable it once the input encoder handles [`Modes::kitty_keyboard`] flags.
+    pub fn set_kitty_keyboard(&mut self, enabled: bool) {
+        if self.config.kitty_keyboard != enabled {
+            self.config.kitty_keyboard = enabled;
+            self.term.set_options(self.config.clone());
+            // `set_options` re-announces the current title; that is not a new event.
+            self.listener
+                .0
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clear();
+        }
     }
 
     /// Cell size in pixels, used to answer `CSI 14 t` (text area size in pixels).
@@ -418,22 +488,8 @@ impl Terminal {
         for ev in events {
             match ev {
                 Event::PtyWrite(s) => self.replies.extend_from_slice(s.as_bytes()),
-                Event::ColorRequest(idx, fmt) => {
-                    let p = self.palette();
-                    let rgb = match idx {
-                        0..=255 => p.colors[idx],
-                        i if i == NamedColor::Foreground as usize => p.foreground,
-                        i if i == NamedColor::Background as usize => p.background,
-                        i if i == NamedColor::Cursor as usize => p.cursor,
-                        _ => continue,
-                    };
-                    let reply = fmt(ansi::Rgb {
-                        r: rgb.r,
-                        g: rgb.g,
-                        b: rgb.b,
-                    });
-                    self.replies.extend_from_slice(reply.as_bytes());
-                }
+                // Answered in order by the shim; alacritty's own request path is unused.
+                Event::ColorRequest(..) => {}
                 Event::TextAreaSizeRequest(fmt) => {
                     let (cw, ch) = self.cell_px.unwrap_or((0, 0));
                     let ws = WindowSize {

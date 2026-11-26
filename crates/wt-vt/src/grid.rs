@@ -106,7 +106,27 @@ impl<'a> GridView<'a> {
                 Column((p.col as usize).min(self.cols() as usize - 1)),
             )
         };
-        self.term.bounds_to_string(clamp(start), clamp(end))
+        let (start, end) = (clamp(start), clamp(end));
+        let last = Column(self.cols() as usize - 1);
+        let end_row = &self.term.grid()[end.line];
+        if end.column == last
+            && end_row[last]
+                .flags
+                .contains(Flags::LEADING_WIDE_CHAR_SPACER)
+        {
+            // Alacritty appends the wrapped wide char from the *previous* row here (and
+            // panics at the oldest row); take it from the next row ourselves.
+            let mut text = self
+                .term
+                .bounds_to_string(start, APoint::new(end.line, last - 1));
+            if end.line.0 + 1 < self.rows() as i32 {
+                let next = &self.term.grid()[Line(end.line.0 + 1)][Column(0)];
+                text.push(next.c);
+                text.extend(next.zerowidth().into_iter().flatten());
+            }
+            return text;
+        }
+        self.term.bounds_to_string(start, end)
     }
 
     /// The whole live screen as text, one `\n`-terminated row per screen row,

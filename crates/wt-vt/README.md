@@ -74,6 +74,14 @@ grid contents. Plus a random-bytes no-panic test.
   and says "apps that build Rune patch it too". The root `Cargo.toml` needs a
   `[patch.crates-io]` section pointing those at Rune's `vendor/` dirs (same git rev). Until
   then, build with a local `--config` file containing that patch section.
+- Synchronized updates (`CSI ?2026h`) are buffered by the parser. wt-app should call
+  `flush_expired_sync_update()` when `sync_update_deadline()` passes (no new bytes may
+  arrive), and `flush_sync_update()` when the child exits.
+- Kitty keyboard protocol is off until wt-app calls `set_kitty_keyboard(true)` (only do so
+  once the key encoder honours `Modes::kitty_keyboard`).
+- Grid width is clamped to at least 2 columns so a wide character always fits.
+- `src/shim.rs` also works around alacritty bugs: DCH past the row end, relative cursor
+  moves in origin mode, color-query reply ordering, and RIS not resetting the title.
 - Blink: alacritty drops SGR 5/6/25; `src/shim.rs` intercepts SGR to carry it in a spare
   cell-flag bit. It delegates every other `vte::ansi::Handler` method to alacritty's `Term`;
   re-check the method list when bumping vte.

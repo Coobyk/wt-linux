@@ -6,13 +6,46 @@
 
 #![allow(clippy::all)]
 
-use alacritty_terminal::term::Term;
+use alacritty_terminal::event::{Event, EventListener};
+use alacritty_terminal::grid::Dimensions;
+use alacritty_terminal::term::{Term, TermMode};
 use alacritty_terminal::vte::ansi::*;
 
-use crate::{BLINK_FLAG, Listener};
+use crate::{BLINK_FLAG, Listener, Palette};
 
 pub(crate) struct Shim<'a> {
     pub term: &'a mut Term<Listener>,
+    pub listener: &'a Listener,
+    pub palette: &'a Palette,
+}
+
+impl Shim<'_> {
+    /// Absolute line of the scroll region's top in origin mode, else 0.
+    ///
+    /// Alacritty's relative moves pass the absolute cursor line to `goto`, which adds the
+    /// origin offset again; callers subtract this first. The region isn't public, so probe
+    /// it with `goto(0, _)` and restore the cursor.
+    fn origin_top(&mut self) -> i32 {
+        if !self.term.mode().contains(TermMode::ORIGIN) {
+            return 0;
+        }
+        let cursor = &self.term.grid().cursor;
+        let (point, wrap) = (cursor.point, cursor.input_needs_wrap);
+        Handler::goto(self.term, 0, point.column.0);
+        let top = self.term.grid().cursor.point.line.0;
+        let cursor = &mut self.term.grid_mut().cursor;
+        cursor.point = point;
+        cursor.input_needs_wrap = wrap;
+        top
+    }
+
+    /// Move to a line relative to the current one, as `goto` (origin-relative) expects.
+    fn goto_relative(&mut self, delta: i32, col: Option<usize>) {
+        let top = self.origin_top();
+        let point = self.term.grid().cursor.point;
+        let line = (point.line.0 - top + delta).max(0);
+        Handler::goto(self.term, line, col.unwrap_or(point.column.0));
+    }
 }
 
 impl Handler for Shim<'_> {
@@ -61,7 +94,7 @@ impl Handler for Shim<'_> {
     }
 
     fn goto_col(&mut self, a0: usize) {
-        Handler::goto_col(self.term, a0)
+        self.goto_relative(0, Some(a0))
     }
 
     fn insert_blank(&mut self, a0: usize) {
@@ -69,11 +102,11 @@ impl Handler for Shim<'_> {
     }
 
     fn move_up(&mut self, a0: usize) {
-        Handler::move_up(self.term, a0)
+        self.goto_relative(-(a0.min(i32::MAX as usize) as i32), None)
     }
 
     fn move_down(&mut self, a0: usize) {
-        Handler::move_down(self.term, a0)
+        self.goto_relative(a0.min(i32::MAX as usize) as i32, None)
     }
 
     fn identify_terminal(&mut self, a0: Option<char>) {
@@ -93,11 +126,11 @@ impl Handler for Shim<'_> {
     }
 
     fn move_down_and_cr(&mut self, a0: usize) {
-        Handler::move_down_and_cr(self.term, a0)
+        self.goto_relative(a0.min(i32::MAX as usize) as i32, Some(0))
     }
 
     fn move_up_and_cr(&mut self, a0: usize) {
-        Handler::move_up_and_cr(self.term, a0)
+        self.goto_relative(-(a0.min(i32::MAX as usize) as i32), Some(0))
     }
 
     fn put_tab(&mut self, a0: u16) {
@@ -153,7 +186,10 @@ impl Handler for Shim<'_> {
     }
 
     fn delete_chars(&mut self, a0: usize) {
-        Handler::delete_chars(self.term, a0)
+        // Alacritty clamps to the row width, not to the cells right of the cursor, and
+        // would then clear cells left of the cursor.
+        let remaining = self.term.columns() - self.term.grid().cursor.point.column.0;
+        Handler::delete_chars(self.term, a0.min(remaining))
     }
 
     fn move_backward_tabs(&mut self, a0: u16) {
@@ -189,7 +225,8 @@ impl Handler for Shim<'_> {
     }
 
     fn reset_state(&mut self) {
-        Handler::reset_state(self.term)
+        Handler::reset_state(self.term);
+        self.listener.send_event(Event::ResetTitle);
     }
 
     fn reverse_index(&mut self) {
@@ -244,8 +281,21 @@ impl Handler for Shim<'_> {
         Handler::set_color(self.term, a0, a1)
     }
 
-    fn dynamic_color_sequence(&mut self, a0: String, a1: usize, a2: &str) {
-        Handler::dynamic_color_sequence(self.term, a0, a1, a2)
+    /// Answered here rather than via alacritty's `ColorRequest` event so the reply
+    /// reflects the colors at this point in the stream, not after the whole chunk.
+    fn dynamic_color_sequence(&mut self, prefix: String, index: usize, terminator: &str) {
+        let p = crate::effective_palette(self.term, self.palette);
+        let rgb = match index {
+            0..=255 => p.colors[index],
+            i if i == NamedColor::Foreground as usize => p.foreground,
+            i if i == NamedColor::Background as usize => p.background,
+            i if i == NamedColor::Cursor as usize => p.cursor,
+            _ => return,
+        };
+        let (r, g, b) = (rgb.r, rgb.g, rgb.b);
+        self.listener.send_event(Event::PtyWrite(format!(
+            "\x1b]{prefix};rgb:{r:02x}{r:02x}/{g:02x}{g:02x}/{b:02x}{b:02x}{terminator}"
+        )));
     }
 
     fn reset_color(&mut self, a0: usize) {

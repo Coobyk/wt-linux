@@ -469,7 +469,7 @@ fn zero_size_is_clamped() {
     let mut t = Terminal::new(0, 0, 0);
     t.feed(b"abc\r\n");
     t.resize(0, 0);
-    assert_eq!((t.cols(), t.rows()), (1, 1));
+    assert_eq!((t.cols(), t.rows()), (2, 1));
 }
 
 #[test]
@@ -571,4 +571,123 @@ fn output_of_real_printf() {
     assert_eq!(g.cell(0, 1).fg, Color::Indexed(1));
     assert_eq!(g.cell(0, 2).attrs, Attrs::BOLD | Attrs::UNDERLINE);
     assert_eq!(g.cell(1, 0).attrs, Attrs::INVERSE);
+}
+
+#[test]
+fn one_column_request_fits_wide_chars() {
+    let mut t = Terminal::new(1, 3, 10);
+    assert_eq!(t.cols(), 2);
+    t.feed("漢字a".as_bytes());
+    t.resize(1, 3);
+    t.feed("漢".as_bytes());
+}
+
+#[test]
+fn erase_damage_stays_in_grid() {
+    let mut t = term(10, 4);
+    t.take_damage();
+    t.feed(b"\x1b[1;6H\x1b[10X");
+    match t.take_damage() {
+        Damage::Rows(rows) => assert!(rows.iter().all(|r| r.right <= 9 && r.left <= 9), "{rows:?}"),
+        Damage::Full => {}
+    }
+}
+
+#[test]
+fn text_range_includes_wrapped_wide_char() {
+    let mut t = term(5, 3);
+    t.feed("abcd漢x".as_bytes());
+    let g = t.grid();
+    assert_eq!(g.line(0).cell(4).width, CellWidth::LeadingSpacer);
+    assert_eq!(g.text_range(Point::new(0, 0), Point::new(0, 4)), "abcd漢");
+    assert_eq!(g.text_range(Point::new(0, 0), Point::new(1, 2)), "abcd漢x");
+}
+
+#[test]
+fn synchronized_update_flushes() {
+    let mut t = term(20, 2);
+    t.feed(b"\x1b[?2026hhello");
+    assert_eq!(row(&t, 0), "");
+    assert!(t.sync_update_deadline().is_some());
+    assert!(!t.flush_expired_sync_update() || row(&t, 0) == "hello");
+    t.flush_sync_update();
+    assert_eq!(row(&t, 0), "hello");
+    assert!(t.sync_update_deadline().is_none());
+
+    t.feed(b"\x1b[?2026h world");
+    std::thread::sleep(t.sync_update_deadline().unwrap() - std::time::Instant::now());
+    assert!(t.flush_expired_sync_update());
+    assert_eq!(row(&t, 0), "hello world");
+}
+
+#[test]
+fn color_query_answers_value_at_query_time() {
+    let mut t = term(10, 2);
+    t.feed(b"\x1b]4;1;?\x07\x1b]4;1;rgb:00/00/00\x07\x1b]4;1;?\x07");
+    let replies = String::from_utf8(t.take_replies()).unwrap();
+    assert_eq!(
+        replies,
+        "\x1b]4;1;rgb:c5c5/0f0f/1f1f\x07\x1b]4;1;rgb:0000/0000/0000\x07"
+    );
+}
+
+#[test]
+fn delete_chars_past_row_end_keeps_left_text() {
+    let mut t = term(10, 1);
+    t.feed(b"abcdefghij\x1b[1;9H\x1b[5P");
+    assert_eq!(row(&t, 0), "abcdefgh");
+}
+
+#[test]
+fn origin_mode_relative_moves() {
+    let mut t = term(10, 10);
+    t.feed(b"\x1b[5;8r\x1b[?6h\x1b[2;1H");
+    assert_eq!((t.cursor().row, t.cursor().col), (5, 0));
+    t.feed(b"\x1b[4G");
+    assert_eq!((t.cursor().row, t.cursor().col), (5, 3));
+    t.feed(b"\x1b[A");
+    assert_eq!(t.cursor().row, 4);
+    t.feed(b"\x1b[5A");
+    assert_eq!(t.cursor().row, 4);
+    t.feed(b"\x1b[2B");
+    assert_eq!(t.cursor().row, 6);
+    t.feed(b"\x1b[9E");
+    assert_eq!((t.cursor().row, t.cursor().col), (7, 0));
+    t.feed(b"\x1b[?6l\x1b[1;1H\x1b[3B\x1b[5G");
+    assert_eq!((t.cursor().row, t.cursor().col), (3, 4));
+}
+
+#[test]
+fn kitty_keyboard_opt_in() {
+    let mut t = term(10, 2);
+    t.feed(b"\x1b[>1u");
+    assert_eq!(t.modes().kitty_keyboard, 0);
+    t.set_kitty_keyboard(true);
+    assert!(t.take_events().is_empty());
+    t.feed(b"\x1b[>1u\x1b[?u");
+    assert_eq!(t.modes().kitty_keyboard, 1);
+    assert_eq!(t.take_replies(), b"\x1b[?1u");
+}
+
+#[test]
+fn set_palette_damages_everything() {
+    let mut t = term(10, 2);
+    t.take_damage();
+    t.set_palette(Palette::default());
+    assert_eq!(t.take_damage(), Damage::Full);
+}
+
+#[test]
+fn ris_resets_title() {
+    let mut t = term(10, 2);
+    t.feed(b"\x1b]2;hi\x07");
+    assert_eq!(t.title(), Some("hi"));
+    t.take_events();
+    t.feed(b"\x1bc");
+    assert_eq!(t.title(), None);
+    assert!(
+        t.take_events()
+            .iter()
+            .any(|e| matches!(e, TermEvent::ResetTitle))
+    );
 }
