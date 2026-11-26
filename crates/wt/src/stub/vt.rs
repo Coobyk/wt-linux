@@ -21,6 +21,8 @@ enum Esc {
     #[default]
     Ground,
     Escape,
+    /// `ESC (` and friends: one more byte (the charset) follows.
+    Charset,
     Csi(String),
     Osc,
     OscEscape,
@@ -115,9 +117,11 @@ impl Terminal {
                 self.esc = match b {
                     b'[' => Esc::Csi(String::new()),
                     b']' => Esc::Osc,
+                    b'(' | b')' | b'*' | b'+' | b'-' | b'.' | b'/' | b'#' | b'%' => Esc::Charset,
                     _ => Esc::Ground,
                 }
             }
+            Esc::Charset => {}
             Esc::Csi(mut p) => {
                 if (0x40..=0x7e).contains(&b) {
                     self.csi(&p, b as char);
@@ -244,7 +248,7 @@ mod tests {
     #[test]
     fn prints_wraps_scrolls_and_drops_escapes() {
         let mut t = Terminal::new(5, 2, 10);
-        t.feed(b"\x1b[1;32mab\x1b[0m\r\n\x1b]0;title\x07h\xc3");
+        t.feed(b"\x1b[1;32ma\x1b(Bb\x1b[0m\r\n\x1b]0;title\x07h\xc3");
         t.feed(b"\xa9llo!");
         assert_eq!(screen(&t), ["héllo", "!"]);
         assert_eq!(t.grid().scrollback_len(), 1);
