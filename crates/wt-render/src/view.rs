@@ -59,7 +59,7 @@ impl TerminalView {
     }
 
     /// Fixes the cell size in points instead of measuring the monospace font; text is tracked to
-    /// the cell width so glyphs stay on their columns.
+    /// the cell width so glyphs stay on their columns, including after a mono family change.
     pub fn cell_size(self, w: f32, h: f32) -> TerminalView {
         self.cell.set(Some((w, h)));
         self.rehash_config();
@@ -82,12 +82,16 @@ impl TerminalView {
 
     pub fn metrics(&self) -> Metrics {
         let base = TextStyle::new(self.font_size, 400.0).mono();
-        let natural = self.advance.get().unwrap_or_else(|| {
-            let w = rune::text::advance("0000000000", base) / 10.0;
-            let w = if w > 0.0 { w } else { self.font_size * 0.6 };
-            self.advance.set(Some(w));
-            w
-        });
+        let natural = rune::text::advance("0000000000", base) / 10.0;
+        let natural = if natural > 0.0 {
+            natural
+        } else {
+            self.font_size * 0.6
+        };
+        if self.advance.get() != Some(natural) {
+            self.advance.set(Some(natural));
+            self.rehash_config();
+        }
         let (w, h) = self
             .cell
             .get()
@@ -124,6 +128,7 @@ impl TerminalView {
         if let Some((w, ch)) = self.cell.get() {
             (w.to_bits(), ch.to_bits()).hash(&mut h);
         }
+        self.advance.get().map(f32::to_bits).hash(&mut h);
         self.config.set(h.finish());
     }
 

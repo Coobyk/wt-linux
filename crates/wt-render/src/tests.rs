@@ -285,3 +285,26 @@ fn block_cursor_keeps_the_rows_strikethrough() {
     assert!(with.over.is_some());
     assert_eq!(with.over, without.over);
 }
+
+#[test]
+fn a_mono_family_change_retracks_and_rebuilds_every_row() {
+    let view = Rc::new(TerminalView::default().cell_size(9.0, 18.0));
+    let s = Screen {
+        term: MockTerminal::new(10, 3),
+        view: view.clone(),
+        sel: Selection::None,
+        scroll: 0,
+    };
+    let mut rt = Runtime::new(s, screen_view, (100.0, 60.0), Env::new(true, 1.0));
+    rt.set_font_families("DejaVu Sans", "DejaVu Sans Mono");
+    rt.frame(0.0);
+    let before = view.metrics().style.tracking;
+    rt.set_font_families("DejaVu Sans", "JetBrains Mono");
+    rt.invalidate();
+    rt.frame(0.016);
+    let m = view.metrics();
+    assert_ne!(before, m.style.tracking);
+    let per_char = rune::text::advance("0000000000", m.style) / 10.0;
+    assert!((per_char - 9.0).abs() < 0.05, "{per_char}");
+    assert_eq!(view.last_damage().rebuilt, vec![0, 1, 2]);
+}
