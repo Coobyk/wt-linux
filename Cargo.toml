@@ -1,0 +1,22 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/wt-backend",
+    "crates/wt-vt",
+    "crates/wt-render",
+    "crates/wt-app",
+    "crates/wt",
+]
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/Coobyk/wt-linux"
+
+[workspace.dependencies]
+# Rune is pre-release; pin a rev of `dev` (the branch is never rewritten).
+rune = { git = "https://github.com/anomalyco/rune", branch = "dev" }
+portable-pty = "0.9"
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+toml = "0.9"

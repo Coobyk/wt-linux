@@ -1,0 +1,8 @@
+[package]
+name = "wt-backend"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+portable-pty.workspace = true

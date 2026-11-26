@@ -1,0 +1,13 @@
+[package]
+name = "wt-app"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+rune.workspace = true
+serde.workspace = true
+toml.workspace = true
+wt-backend = { path = "../wt-backend" }
+wt-vt = { path = "../wt-vt" }
+wt-render = { path = "../wt-render" }

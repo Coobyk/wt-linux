@@ -1,0 +1,9 @@
+[package]
+name = "wt-render"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+rune.workspace = true
+wt-vt = { path = "../wt-vt" }
