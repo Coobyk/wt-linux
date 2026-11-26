@@ -10,7 +10,8 @@ pub fn matches(c: &Chord, ev: &KeyEvent) -> bool {
         return false;
     }
     match (&c.key, &ev.key) {
-        (ChordKey::Char(ch), Key::Command(k)) => ch == k && c.shift == m.shift,
+        // Shifted punctuation (`+` is Shift+= on most layouts) carries Shift implicitly.
+        (ChordKey::Char(ch), Key::Command(k)) => ch == k && (c.shift == m.shift || !ch.is_alphanumeric()),
         (ChordKey::Char(ch), Key::Text(t)) => {
             let mut it = t.chars().flat_map(char::to_lowercase);
             let one = matches!((it.next(), it.next()), (Some(k), None) if k == *ch);
@@ -45,12 +46,9 @@ fn named(k: &Key) -> Option<&'static str> {
     })
 }
 
-/// The first action whose chord matches.
-pub fn action<'a>(keymap: &'a [(String, Chord)], ev: &KeyEvent) -> Option<&'a str> {
-    keymap
-        .iter()
-        .find(|(_, c)| matches(c, ev))
-        .map(|(a, _)| a.as_str())
+/// Every action whose chord matches, in keymap order.
+pub fn actions<'a>(keymap: &'a [(String, Chord)], ev: &'a KeyEvent) -> impl Iterator<Item = &'a str> {
+    keymap.iter().filter(|(_, c)| matches(c, ev)).map(|(a, _)| a.as_str())
 }
 
 /// xterm modifier parameter: 1 + shift + 2·alt + 4·ctrl.
@@ -193,7 +191,7 @@ mod tests {
             ),
             Some("new_tab")
         );
-        assert_eq!(action(&keymap, &ev(Key::Text("t".into()), |_| {})), None);
+        assert_eq!(actions(&keymap, &ev(Key::Text("t".into()), |_| {})).next(), None);
     }
 
     #[test]

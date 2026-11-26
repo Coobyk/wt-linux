@@ -291,9 +291,8 @@ fn poll(s: &mut State, _t: f64, tx: &mut Tx) -> bool {
 }
 
 fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
-    if let Some(action) = crate::input::action(&s.keymap, ev).map(str::to_owned)
-        && s.run_action(&action, tx)
-    {
+    let matched: Vec<String> = crate::input::actions(&s.keymap, ev).map(str::to_owned).collect();
+    if matched.iter().any(|a| s.run_action(a, tx)) {
         return true;
     }
     match (crate::input::encode(ev), s.tabs.active_mut()) {
