@@ -113,8 +113,32 @@ fn span_for(start: usize, end: usize, k: &RunKey, fg: Color) -> Span {
     s
 }
 
+/// One row's draw lists before they become a `GridRow`.
+pub(crate) struct RowParts {
+    pub line: String,
+    pub spans: Vec<Span>,
+    pub pinned: Vec<(u16, u16, String, TextStyle, Color)>,
+    pub fills: Vec<(u16, u16, [u8; 3])>,
+    pub over: Option<Shape>,
+}
+
 /// Builds the `GridRow` for one visible row. Pure: same input, same row.
 pub(crate) fn build(inp: &RowInput, pal: &Palette, m: &Metrics) -> GridRow {
+    let p = parts(inp, pal, m);
+    let mut row = GridRow::new(p.line, p.spans, m.style);
+    for (start, end, rgb) in p.fills {
+        row = row.fill(start, end, color(rgb));
+    }
+    for (col, w, text, style, fg) in p.pinned {
+        row = row.cell(col, w, text, style, fg);
+    }
+    if let Some(over) = p.over {
+        row = row.shape(over);
+    }
+    row
+}
+
+pub(crate) fn parts(inp: &RowInput, pal: &Palette, m: &Metrics) -> RowParts {
     let blank = Cell::default();
     let cols = inp.cols as usize;
     let (cw, ch) = (m.cell_w, m.cell_h);
@@ -180,6 +204,9 @@ pub(crate) fn build(inp: &RowInput, pal: &Palette, m: &Metrics) -> GridRow {
                 }
             }
         } else {
+            if let Some((s, k, fg)) = run.take() {
+                spans.push(span_for(s, c, &k, fg));
+            }
             line.push(' ');
             if shown && cell.ch != ' ' {
                 let mut text = String::from(cell.ch);
@@ -208,34 +235,27 @@ pub(crate) fn build(inp: &RowInput, pal: &Palette, m: &Metrics) -> GridRow {
         let w = cursor_w as f32 * cw;
         let c = color(pal.cursor);
         let thin = (cw * 0.12).max(1.0);
-        has_over = true;
-        over = match (k.focused, k.shape) {
-            (true, CursorShape::Block) => {
-                has_over = false;
-                over
-            }
-            (true, CursorShape::Line) => rect(over, x, 0.0, thin, ch, c),
-            (true, CursorShape::Underline) => {
-                rect(over, x, ch - thin.max(2.0), w, thin.max(2.0), c)
-            }
-            (false, _) => {
-                let o = rect(over, x, 0.0, w, 1.0, c);
-                let o = rect(o, x, ch - 1.0, w, 1.0, c);
-                let o = rect(o, x, 0.0, 1.0, ch, c);
-                rect(o, x + w - 1.0, 0.0, 1.0, ch, c)
-            }
-        };
+        // A focused block is drawn as the cell's own fill and text colours above.
+        if !(k.focused && k.shape == CursorShape::Block) {
+            has_over = true;
+            over = match (k.focused, k.shape) {
+                (true, CursorShape::Line) => rect(over, x, 0.0, thin, ch, c),
+                (true, _) => rect(over, x, ch - thin.max(2.0), w, thin.max(2.0), c),
+                (false, _) => {
+                    let o = rect(over, x, 0.0, w, 1.0, c);
+                    let o = rect(o, x, ch - 1.0, w, 1.0, c);
+                    let o = rect(o, x, 0.0, 1.0, ch, c);
+                    rect(o, x + w - 1.0, 0.0, 1.0, ch, c)
+                }
+            };
+        }
     }
 
-    let mut row = GridRow::new(line, spans, m.style);
-    for (start, end, rgb) in fills {
-        row = row.fill(start, end, color(rgb));
+    RowParts {
+        line,
+        spans,
+        pinned,
+        fills,
+        over: has_over.then_some(over),
     }
-    for (col, w, text, style, fg) in pinned {
-        row = row.cell(col, w, text, style, fg);
-    }
-    if has_over {
-        row = row.shape(over);
-    }
-    row
 }

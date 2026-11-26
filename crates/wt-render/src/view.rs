@@ -27,6 +27,7 @@ pub struct TerminalView {
     palette: Palette,
     font_size: f32,
     cell: Slot<Option<(f32, f32)>>,
+    advance: Slot<Option<f32>>,
     focused: bool,
     config: Slot<u64>,
     rows: RefCell<Vec<CachedRow>>,
@@ -46,6 +47,7 @@ impl TerminalView {
             palette,
             font_size,
             cell: Slot::new(None),
+            advance: Slot::new(None),
             focused: true,
             config: Slot::new(0),
             rows: RefCell::new(Vec::new()),
@@ -56,7 +58,8 @@ impl TerminalView {
         v
     }
 
-    /// Fixes the cell size in points instead of measuring the monospace font.
+    /// Fixes the cell size in points instead of measuring the monospace font; text is tracked to
+    /// the cell width so glyphs stay on their columns.
     pub fn cell_size(self, w: f32, h: f32) -> TerminalView {
         self.cell.set(Some((w, h)));
         self.rehash_config();
@@ -78,17 +81,24 @@ impl TerminalView {
     }
 
     pub fn metrics(&self) -> Metrics {
-        let style = TextStyle::new(self.font_size, 400.0).mono();
-        let (w, h) = self.cell.get().unwrap_or_else(|| {
-            let w = rune::text::advance("0000000000", style) / 10.0;
-            let h = (self.font_size * 1.25).ceil();
+        let base = TextStyle::new(self.font_size, 400.0).mono();
+        let natural = self.advance.get().unwrap_or_else(|| {
+            let w = rune::text::advance("0000000000", base) / 10.0;
             let w = if w > 0.0 { w } else { self.font_size * 0.6 };
-            self.cell.set(Some((w, h)));
-            self.rehash_config();
-            (w, h)
+            self.advance.set(Some(w));
+            w
         });
+        let (w, h) = self
+            .cell
+            .get()
+            .unwrap_or((natural, (self.font_size * 1.25).ceil()));
+        let style = TextStyle {
+            tracking: w - natural,
+            ..base
+        }
+        .lh(h);
         Metrics {
-            style: style.lh(h),
+            style,
             cell_w: w,
             cell_h: h,
         }

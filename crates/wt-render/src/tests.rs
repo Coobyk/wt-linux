@@ -207,3 +207,81 @@ fn element_tree_has_the_terminal() {
     let a11y = rt.accessibility_json().to_string();
     assert!(a11y.contains(r#""role":"terminal""#), "{a11y}");
 }
+
+#[test]
+fn fixed_cells_track_text_onto_columns() {
+    for v in [
+        TerminalView::default(),
+        TerminalView::default().cell_size(8.0, 18.0),
+        TerminalView::default().cell_size(11.0, 20.0),
+    ] {
+        let m = v.metrics();
+        let per_char = rune::text::advance("0000000000", m.style) / 10.0;
+        assert!(
+            (per_char - m.cell_w).abs() < 0.05,
+            "{per_char} vs {}",
+            m.cell_w
+        );
+    }
+}
+
+#[test]
+fn underline_stops_at_a_plain_pinned_cell() {
+    let u = Cell::default().attrs(Attrs::UNDERLINE);
+    let cells = vec![
+        Cell {
+            ch: 'a',
+            ..u.clone()
+        },
+        Cell {
+            ch: 'b',
+            ..u.clone()
+        },
+        Cell::new('é'),
+        Cell { ch: 'c', ..u },
+    ];
+    let inp = crate::row::RowInput {
+        cells: &cells,
+        cols: 4,
+        sel: None,
+        cursor: None,
+    };
+    let m = TerminalView::default().cell_size(8.0, 18.0).metrics();
+    let p = crate::row::parts(&inp, &Palette::default(), &m);
+    let underlined: Vec<(u32, u32)> = p
+        .spans
+        .iter()
+        .filter(|s| s.underline.is_some())
+        .map(|s| (s.start, s.end))
+        .collect();
+    assert_eq!(underlined, vec![(0, 2), (3, 4)]);
+    assert_eq!(p.pinned.len(), 1);
+}
+
+#[test]
+fn block_cursor_keeps_the_rows_strikethrough() {
+    let cells = vec![Cell::new('x').attrs(Attrs::STRIKE), Cell::new('y')];
+    let m = TerminalView::default().cell_size(8.0, 18.0).metrics();
+    let cursor = crate::row::RowCursor {
+        col: 1,
+        shape: CursorShape::Block,
+        focused: true,
+    };
+    let inp = crate::row::RowInput {
+        cells: &cells,
+        cols: 2,
+        sel: None,
+        cursor: Some(cursor),
+    };
+    let with = crate::row::parts(&inp, &Palette::default(), &m);
+    let without = crate::row::parts(
+        &crate::row::RowInput {
+            cursor: None,
+            ..inp
+        },
+        &Palette::default(),
+        &m,
+    );
+    assert!(with.over.is_some());
+    assert_eq!(with.over, without.over);
+}

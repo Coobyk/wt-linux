@@ -171,8 +171,8 @@ impl Selection {
     }
 }
 
-/// What `TerminalView` reads from a terminal. `wt-vt::Terminal` implements it through its
-/// `grid()` / `cursor()` contract; tests implement it with a fake.
+/// What `TerminalView` reads from a terminal. Until `wt-vt` ships `GridView`, only fakes
+/// implement it (see the crate README); the `wt_vt::Terminal` adapter goes in this crate.
 pub trait TermSource {
     /// `(cols, rows)` of the live screen.
     fn size(&self) -> (u16, u16);
