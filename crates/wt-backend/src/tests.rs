@@ -277,3 +277,102 @@ fn drop_kills_child() {
         std::thread::sleep(Duration::from_millis(10));
     }
 }
+
+#[test]
+fn is_closed_never_loses_events() {
+    let pty = Pty::spawn(sh("printf peek-me; exit 4")).unwrap();
+    let ev = pty.pump(None).unwrap();
+    let mut out = Vec::new();
+    let mut status = None;
+    let deadline = Instant::now() + TIMEOUT;
+    // Interleave is_closed with receives; every byte and the exit must still arrive.
+    while !ev.is_closed() {
+        assert!(Instant::now() < deadline);
+        match ev.try_recv() {
+            Some(PtyEvent::Output(b)) => out.extend_from_slice(&b),
+            Some(PtyEvent::Exited(s)) => status = Some(s),
+            None => std::thread::sleep(Duration::from_millis(1)),
+        }
+    }
+    assert!(String::from_utf8_lossy(&out).contains("peek-me"), "{out:?}");
+    assert_eq!(status.map(|s| s.exit_code()), Some(4));
+}
+
+#[test]
+fn cwd_defaults_to_ours() {
+    let ours = std::env::current_dir().unwrap();
+    let pty = Pty::spawn(PtySpec::new("/bin/pwd")).unwrap();
+    let (out, _) = read_to_exit(&pty.pump(None).unwrap());
+    assert!(out.contains(ours.to_str().unwrap()), "{out:?} vs {ours:?}");
+}
+
+#[test]
+fn bad_cwd_is_an_error() {
+    let err = Pty::spawn(PtySpec::new("/bin/pwd").cwd("/definitely/not/a/dir"))
+        .err()
+        .unwrap();
+    assert!(err.to_string().contains("not a directory"), "{err:#}");
+}
+
+#[test]
+fn hup_ignoring_child_is_killed() {
+    // Doesn't read stdin, so only a signal can end it.
+    let pty = Pty::spawn(sh("trap '' HUP; while :; do sleep 0.05; done")).unwrap();
+    // Give the trap time to install before we signal.
+    std::thread::sleep(Duration::from_millis(200));
+    pty.kill().unwrap();
+    let exit = pty.exit.clone();
+    drop(pty);
+    let t0 = Instant::now();
+    assert!(
+        exit.wait_timeout(Duration::from_millis(500)).is_none(),
+        "SIGHUP should be ignored"
+    );
+    let status = exit
+        .wait_timeout(TIMEOUT)
+        .expect("child survived SIGHUP + SIGKILL");
+    assert!(!status.success(), "{status:?}");
+    assert!(t0.elapsed() < KILL_GRACE + Duration::from_secs(1));
+}
+
+#[test]
+fn drop_releases_pump_despite_grandchild() {
+    let pty = Pty::spawn(sh("sleep 30 & exit 0")).unwrap();
+    let ev = pty.pump(None).unwrap();
+    let _ = read_to_exit(&ev);
+    drop(pty);
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while !ev.is_closed() {
+        assert!(Instant::now() < deadline, "read thread still holds the pty");
+        let _ = ev.recv_timeout(Duration::from_millis(20));
+    }
+}
+
+#[test]
+fn writes_never_block() {
+    // The child never reads, so a blocking writer would stall once the tty queue fills.
+    let pty = Pty::spawn(sh("sleep 30")).unwrap();
+    let mut w = pty.writer();
+    let t0 = Instant::now();
+    w.write_all(&vec![b'x'; 1 << 20]).unwrap();
+    assert!(
+        t0.elapsed() < Duration::from_secs(1),
+        "write blocked for {:?}",
+        t0.elapsed()
+    );
+}
+
+#[test]
+fn writer_fails_after_drop() {
+    let pty = Pty::spawn(PtySpec::new("/bin/cat")).unwrap();
+    let mut w = pty.writer();
+    drop(pty);
+    let deadline = Instant::now() + TIMEOUT;
+    while w.write_all(b"x").is_ok() {
+        assert!(
+            Instant::now() < deadline,
+            "writes still accepted after drop"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}

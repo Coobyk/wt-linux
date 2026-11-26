@@ -10,14 +10,19 @@ mod pump;
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use portable_pty::{ChildKiller, CommandBuilder, MasterPty, PtySize, native_pty_system};
 
 pub use portable_pty::ExitStatus;
 pub use pump::{PtyEvent, PtyEvents};
+
+/// How long a child gets to exit after `SIGHUP` before it is sent `SIGKILL`.
+const KILL_GRACE: Duration = Duration::from_secs(2);
 
 /// Called from a background thread when new events are queued.
 /// Same type as `rune::Waker`, so the app's setup waker can be passed straight in.
@@ -29,7 +34,7 @@ pub struct PtySpec {
     /// Program to run. Empty means the user's login shell (`$SHELL`, else `/bin/sh`).
     pub program: String,
     pub args: Vec<String>,
-    /// Working directory; `None` inherits ours.
+    /// Working directory; `None` inherits ours. A path that isn't a directory fails `spawn`.
     pub cwd: Option<PathBuf>,
     /// Extra environment on top of ours. Overrides the `TERM`/`COLORTERM` defaults.
     pub env: Vec<(String, String)>,
@@ -96,7 +101,8 @@ impl PtySpec {
             c.args(&self.args);
             c
         };
-        if let Some(cwd) = &self.cwd {
+        // portable-pty falls back to $HOME without a cwd, so pass ours explicitly.
+        if let Some(cwd) = self.cwd.clone().or_else(|| std::env::current_dir().ok()) {
             cmd.cwd(cwd);
         }
         cmd.env("TERM", "xterm-256color");
@@ -126,6 +132,15 @@ impl ExitCell {
         self.status.lock().unwrap().clone()
     }
 
+    fn wait_timeout(&self, timeout: Duration) -> Option<ExitStatus> {
+        let guard = self.status.lock().unwrap();
+        let (guard, _) = self
+            .cond
+            .wait_timeout_while(guard, timeout, |s| s.is_none())
+            .unwrap();
+        guard.clone()
+    }
+
     pub(crate) fn wait(&self) -> ExitStatus {
         let guard = self
             .cond
@@ -140,18 +155,28 @@ impl ExitCell {
 /// `Send + Sync`; every method takes `&self`. Dropping the `Pty` kills the child.
 pub struct Pty {
     master: Mutex<Box<dyn MasterPty + Send>>,
-    writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    writer: Sender<WriteMsg>,
     killer: Mutex<Box<dyn ChildKiller + Send + Sync>>,
     exit: Arc<ExitCell>,
     pid: Option<u32>,
     pumped: AtomicBool,
+    /// Set on drop; tells the pump's reader to let go of the master even if a grandchild
+    /// still holds the slave open.
+    closing: Arc<AtomicBool>,
 }
 
 impl Pty {
     pub fn spawn(spec: PtySpec) -> Result<Pty> {
+        if let Some(cwd) = &spec.cwd
+            && !cwd.is_dir()
+        {
+            bail!("cwd {} is not a directory", cwd.display());
+        }
         let pair = native_pty_system()
             .openpty(pty_size(spec.cols, spec.rows))
             .context("openpty failed")?;
+        // Everything fallible that doesn't need the child happens before it exists.
+        let writer = start_writer(pair.master.take_writer().context("pty writer")?)?;
         let mut child = pair
             .slave
             .spawn_command(spec.command())
@@ -161,27 +186,32 @@ impl Pty {
 
         let pid = child.process_id();
         let killer = child.clone_killer();
-        let writer = pair.master.take_writer().context("pty writer")?;
-
         let exit = Arc::new(ExitCell::default());
         let cell = exit.clone();
-        thread::Builder::new()
+        let waiter = thread::Builder::new()
             .name("wt-pty-wait".into())
             .spawn(move || {
                 let status = child
                     .wait()
                     .unwrap_or_else(|_| ExitStatus::with_exit_code(1));
                 cell.set(status);
-            })
-            .context("spawn pty waiter thread")?;
+            });
+        if let Err(e) = waiter {
+            // The closure (and the child handle) are gone; reap by pid so no zombie is left.
+            if let Some(pid) = pid {
+                force_kill_and_reap(pid);
+            }
+            return Err(e).context("spawn pty waiter thread");
+        }
 
         Ok(Pty {
             master: Mutex::new(pair.master),
-            writer: Arc::new(Mutex::new(writer)),
+            writer,
             killer: Mutex::new(killer),
             exit,
             pid,
             pumped: AtomicBool::new(false),
+            closing: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -195,8 +225,10 @@ impl Pty {
         }
     }
 
-    /// A handle that writes to the child's stdin (keystrokes, pastes). Handles are cheap
-    /// clones of one shared writer and may be used from any thread.
+    /// A handle that writes to the child's stdin (keystrokes, pastes). Writes never block:
+    /// bytes are queued, in order, to a writer thread, so a paste into a program that has
+    /// stopped reading can't freeze the UI. Handles may be used from any thread. Once the
+    /// child side is gone (or the `Pty` dropped), writes fail with `BrokenPipe`.
     pub fn writer(&self) -> Box<dyn Write + Send> {
         Box::new(PtyWriter(self.writer.clone()))
     }
@@ -235,12 +267,26 @@ impl Pty {
         self.pid
     }
 
-    /// Kill the child (`SIGHUP` on Unix, as a closing terminal would).
+    /// Kill the child: `SIGHUP` on Unix, as a closing terminal would, then `SIGKILL` if it
+    /// is still running 2 s later (on a background thread; this returns at once).
     pub fn kill(&self) -> Result<()> {
         if self.child_exited().is_some() {
             return Ok(());
         }
-        self.killer.lock().unwrap().kill().context("kill child")
+        self.killer.lock().unwrap().kill().context("kill child")?;
+        #[cfg(unix)]
+        if let Some(pid) = self.pid {
+            let exit = self.exit.clone();
+            let _ = thread::Builder::new()
+                .name("wt-pty-kill".into())
+                .spawn(move || {
+                    if exit.wait_timeout(KILL_GRACE).is_none() {
+                        // The waiter thread hasn't reaped the child, so the pid can't be reused yet.
+                        unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+                    }
+                });
+        }
+        Ok(())
     }
 
     /// Start the read-pump: a thread that forwards output into a channel, followed by one
@@ -250,18 +296,15 @@ impl Pty {
         if self.pumped.swap(true, Ordering::SeqCst) {
             bail!("Pty::pump called twice");
         }
-        let reader = self
-            .master
-            .lock()
-            .unwrap()
-            .try_clone_reader()
-            .context("pty reader")?;
-        pump::start(reader, self.exit.clone(), waker)
+        let source = pump::source(&**self.master.lock().unwrap())?;
+        pump::start(source, self.exit.clone(), self.closing.clone(), waker)
     }
 }
 
 impl Drop for Pty {
     fn drop(&mut self) {
+        self.closing.store(true, Ordering::SeqCst);
+        let _ = self.writer.send(WriteMsg::Close);
         let _ = self.kill();
     }
 }
@@ -275,22 +318,55 @@ fn pty_size(cols: u16, rows: u16) -> PtySize {
     }
 }
 
-struct PtyWriter(Arc<Mutex<Box<dyn Write + Send>>>);
+enum WriteMsg {
+    Data(Vec<u8>),
+    Close,
+}
+
+fn start_writer(mut w: Box<dyn Write + Send>) -> Result<Sender<WriteMsg>> {
+    let (tx, rx) = mpsc::channel::<WriteMsg>();
+    thread::Builder::new()
+        .name("wt-pty-write".into())
+        .spawn(move || {
+            while let Ok(WriteMsg::Data(bytes)) = rx.recv() {
+                if w.write_all(&bytes).and_then(|_| w.flush()).is_err() {
+                    break;
+                }
+            }
+        })
+        .context("spawn pty writer thread")?;
+    Ok(tx)
+}
+
+struct PtyWriter(Sender<WriteMsg>);
 
 impl Write for PtyWriter {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.0.lock().unwrap().write(buf)
-    }
-
-    fn write_all(&mut self, buf: &[u8]) -> io::Result<()> {
-        // One lock for the whole buffer so concurrent writers don't interleave mid-paste.
-        self.0.lock().unwrap().write_all(buf)
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        // One message per call, so a `write_all` paste is never interleaved with other handles.
+        self.0
+            .send(WriteMsg::Data(buf.to_vec()))
+            .map_err(|_| io::Error::from(io::ErrorKind::BrokenPipe))?;
+        Ok(buf.len())
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        self.0.lock().unwrap().flush()
+        Ok(())
     }
 }
+
+#[cfg(unix)]
+fn force_kill_and_reap(pid: u32) {
+    unsafe {
+        libc::kill(pid as libc::pid_t, libc::SIGKILL);
+        libc::waitpid(pid as libc::pid_t, std::ptr::null_mut(), 0);
+    }
+}
+
+#[cfg(not(unix))]
+fn force_kill_and_reap(_pid: u32) {}
 
 struct FailedReader(Option<io::Error>);
 

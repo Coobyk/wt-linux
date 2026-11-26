@@ -1,7 +1,7 @@
 # wt-backend
 
 PTY + child-process lifecycle for wt-linux, on top of `portable-pty` 0.9.
-No Rune dependency; fully headless.
+No Rune dependency; fully headless. Deps: `anyhow`, `portable-pty`, and `libc` on Unix (`poll`, `kill`).
 
 ## API
 
@@ -25,9 +25,15 @@ Extras: `PtySpec::{new, arg, args, cwd, env, size}` builders and `Default`
 - `ExitStatus` is `portable_pty::ExitStatus` re-exported: `success()`, `exit_code()`, `signal()`.
 - The child's env is ours plus `TERM=xterm-256color`, `COLORTERM=truecolor`,
   `TERM_PROGRAM=wt-linux`; anything in `PtySpec::env` overrides those.
-- `writer()` handles are clones of one shared writer, usable from any thread;
-  `write_all` holds the lock for the whole buffer, so pastes don't interleave.
-- Dropping the `Pty` kills the child (SIGHUP), like closing a Windows Terminal pane.
+- `PtySpec::cwd = None` inherits our working directory (portable-pty alone would use
+  `$HOME`); a `cwd` that isn't a directory makes `spawn` fail.
+- `writer()` handles never block: each `write` queues its bytes, in order, to a
+  `wt-pty-write` thread, so a big paste into a program that stopped reading can't freeze the
+  UI. One `write_all` is one message, so pastes from different handles don't interleave.
+  After the `Pty` is dropped (or the pty write fails), writes return `BrokenPipe`.
+- `kill()` sends `SIGHUP`, then `SIGKILL` 2 s later if the child is still running; it
+  returns at once. Dropping the `Pty` does the same, like closing a Windows Terminal pane,
+  and also stops the read-pump even if a background grandchild still holds the pty.
 
 ## Consumption model (what wt-app polls)
 
@@ -35,8 +41,8 @@ Channel: **`std::sync::mpsc`** (no extra dependency). `Pty::pump(waker)` starts 
 
 | Thread         | Does |
 | -------------- | ---- |
-| `wt-pty-read`  | blocking `read` on the PTY master in 64 KiB chunks → `PtyEvent::Output(Vec<u8>)` |
-| `wt-pty-exit`  | waits for the child's exit, lets the reader drain (up to 250 ms), then sends one `PtyEvent::Exited(status)` |
+| `wt-pty-read`  | `poll` + `read` on a dup of the PTY master in 64 KiB chunks → `PtyEvent::Output(Vec<u8>)`; checks every 100 ms whether the `Pty` was dropped |
+| `wt-pty-exit`  | waits for the child's exit, lets the reader drain to EOF (while it keeps making progress, up to 3 s), then sends one `PtyEvent::Exited(status)` |
 
 A third thread, `wt-pty-wait`, is started by `spawn` itself and reaps the child so
 `child_exited()` works with or without a pump.
@@ -44,7 +50,7 @@ A third thread, `wt-pty-wait`, is started by `spawn` itself and reaps the child 
 Event order: all `Output` the child wrote before exiting, then `Exited`. `Exited` still arrives
 if a background grandchild keeps the PTY open (`sleep 99 &`); any output it writes later
 comes after `Exited` until the Pty is dropped. Once both pump threads end,
-`PtyEvents::is_closed()` is true.
+`PtyEvents::is_closed()` is true (checking it never drops an event).
 
 The waker is called from the pump threads when events are waiting, **coalesced**: one call
 until the consumer next drains (`drain`, `drain_into`, `try_recv`, `recv_timeout`).
@@ -77,9 +83,11 @@ use one or the other.
 ## Tests
 
 `cargo test -p wt-backend`: headless, spawns `/bin/sh` and `/bin/cat`. Covers echo through
-cat, concurrent writers, raw `reader()`, initial size and `resize` (checked with `stty size`),
-exit codes, ^D EOF, kill, grandchild holding the PTY, env/cwd/TERM, default shell, spawn
-failure, waker coalescing, and drop killing the child.
+cat, concurrent and non-blocking writers, raw `reader()`, initial size and `resize`
+(checked with `stty size`), exit codes, ^D EOF, kill (including a `SIGHUP`-ignoring child),
+a grandchild holding the PTY (both for `Exited` and for releasing the pump on drop),
+env/cwd/TERM, default shell, spawn failures, `is_closed` not losing events, waker
+coalescing, and drop killing the child.
 
 ## Notes for siblings
 
