@@ -72,7 +72,12 @@ fn run(launch: launch::Launch) -> ExitCode {
         }
     };
     let mut input = s.input();
-    std::thread::spawn(move || std::io::copy(&mut std::io::stdin().lock(), &mut input));
+    std::thread::spawn(move || {
+        use std::io::Write;
+        if std::io::copy(&mut std::io::stdin().lock(), &mut input).is_ok() {
+            let _ = input.write_all(b"\x04").and_then(|()| input.flush());
+        }
+    });
     while !(s.is_finished() && s.exit_status().is_some()) {
         s.drain(wt::session::DRAIN_BUDGET);
         std::thread::sleep(std::time::Duration::from_millis(5));

@@ -27,7 +27,6 @@ pub struct State {
     font_size: f32,
     font_family_mono: bool,
     scheme: ColorScheme,
-    cursor_shape: CursorShape,
     /// Last laid-out screen rect, to refit the grid when the font size changes.
     screen: Option<[f32; 4]>,
     error: Option<String>,
@@ -50,7 +49,6 @@ impl State {
             font_size: first.font_size,
             font_family_mono: true,
             scheme: first.color_scheme.clone(),
-            cursor_shape: first.cursor_shape,
             screen: None,
             config: launch.config,
             waker,
@@ -114,7 +112,9 @@ impl State {
 
     /// The active tab's colour scheme (the first profile's while no tab is open).
     fn scheme(&self) -> &ColorScheme {
-        self.tabs.active().map_or(&self.scheme, |s| &s.profile.color_scheme)
+        self.tabs
+            .active()
+            .map_or(&self.scheme, |s| &s.profile.color_scheme)
     }
 
     fn fit(&mut self, rect: [f32; 4]) {
@@ -305,7 +305,9 @@ fn poll(s: &mut State, _t: f64, tx: &mut Tx) -> bool {
 }
 
 fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
-    let matched: Vec<String> = crate::input::actions(&s.keymap, ev).map(str::to_owned).collect();
+    let matched: Vec<String> = crate::input::actions(&s.keymap, ev)
+        .map(str::to_owned)
+        .collect();
     if matched.iter().any(|a| s.run_action(a, tx)) {
         return true;
     }

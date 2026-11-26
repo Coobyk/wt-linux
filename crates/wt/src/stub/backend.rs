@@ -87,13 +87,26 @@ impl Drop for Pty {
 struct SharedStdin(Arc<Mutex<Option<ChildStdin>>>);
 
 impl Write for SharedStdin {
-    /// `\r` -> `\n`, as a tty's ICRNL input flag does, so Enter submits a line.
+    /// `\r` -> `\n`, as a tty's ICRNL input flag does, so Enter submits a line, and
+    /// `^D` closes the child's stdin, as VEOF does.
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        let translated: Vec<u8> = buf.iter().map(|&b| if b == b'\r' { b'\n' } else { b }).collect();
-        match self.0.lock().unwrap().as_mut() {
-            Some(s) => s.write_all(&translated).map(|()| buf.len()),
-            None => Err(std::io::ErrorKind::BrokenPipe.into()),
+        let (data, eof) = match buf.iter().position(|&b| b == 0x04) {
+            Some(i) => (&buf[..i], true),
+            None => (buf, false),
+        };
+        let translated: Vec<u8> = data
+            .iter()
+            .map(|&b| if b == b'\r' { b'\n' } else { b })
+            .collect();
+        let mut stdin = self.0.lock().unwrap();
+        match stdin.as_mut() {
+            Some(s) => s.write_all(&translated)?,
+            None => return Err(std::io::ErrorKind::BrokenPipe.into()),
         }
+        if eof {
+            stdin.take();
+        }
+        Ok(buf.len())
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
