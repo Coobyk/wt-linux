@@ -1,8 +1,10 @@
 //! App state: tabs, panes, modes, and `dispatch`, the one place actions take effect.
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
-use rune::{Family, KeyEvent, TextEdit, TextStyle, Tx};
+use rune::{Family, KeyEvent, TextEdit, TextStyle, Tx, Waker};
 
 use crate::action::{Action, SIMPLE};
 use crate::config::{Config, Profile, Theme};
@@ -10,7 +12,7 @@ use crate::input::encode_key;
 use crate::keymap::{Keymap, pretty};
 use crate::layout::{Layout, PaneId, SplitDir};
 use crate::palette::{Palette, PaletteItem, filter};
-use crate::terminal::{PaneTerminal, SpawnSpec, TerminalFactory, fake_factory};
+use crate::terminal::{Notify, PaneTerminal, SpawnSpec, TerminalFactory, fake_factory};
 
 pub const INITIAL_COLS: u16 = 80;
 /// Palette rows shown; matches past this are neither drawn nor selectable.
@@ -97,6 +99,11 @@ pub struct State {
     pub status: Option<String>,
     next_id: u32,
     factory: TerminalFactory,
+    /// Rune's waker, installed by `spec.setup`; terminals reach it through `notify`.
+    waker: Arc<Mutex<Option<Waker>>>,
+    /// Set when a pane wakes before `setup` ran; `setup` then wakes once itself.
+    pending_wake: Arc<AtomicBool>,
+    notify: Notify,
     scratch: TextEdit,
 }
 
@@ -111,6 +118,16 @@ impl State {
         config_path: Option<PathBuf>,
         factory: TerminalFactory,
     ) -> State {
+        let waker: Arc<Mutex<Option<Waker>>> = Arc::default();
+        let pending_wake = Arc::new(AtomicBool::new(false));
+        let (slot, pending) = (waker.clone(), pending_wake.clone());
+        let notify: Notify = Arc::new(move || {
+            if let Some(w) = slot.lock().unwrap().as_ref() {
+                w();
+            } else {
+                pending.store(true, Ordering::SeqCst);
+            }
+        });
         let (keymap, config_errors) = Keymap::from_config(&config.keybindings);
         let mut s = State {
             config,
@@ -127,11 +144,23 @@ impl State {
             status: None,
             next_id: 1,
             factory,
+            waker,
+            pending_wake,
+            notify,
             scratch: TextEdit::default(),
         };
         let p = s.config.default_profile_index();
         s.new_tab(p);
         s
+    }
+
+    /// `spec.setup` hands Rune's waker to every terminal spawned after this. A wake that
+    /// arrived earlier (the first tab spawns before setup) fired `pending_wake`; flush it.
+    pub fn set_waker(&mut self, waker: Waker) {
+        *self.waker.lock().unwrap() = Some(waker.clone());
+        if self.pending_wake.swap(false, Ordering::SeqCst) {
+            waker();
+        }
     }
 
     fn id(&mut self) -> u32 {
@@ -202,7 +231,7 @@ impl State {
             rows: INITIAL_ROWS,
             profile: p.name.clone(),
         };
-        let term = (self.factory)(&spec);
+        let term = (self.factory)(&spec, self.notify.clone());
         let id = self.id();
         self.panes.insert(
             id,

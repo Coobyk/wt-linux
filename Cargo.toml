@@ -17,6 +17,8 @@ repository = "https://github.com/Coobyk/wt-linux"
 # Rune is pre-release; pin a rev of `dev` (the branch is never rewritten).
 rune = { git = "https://github.com/anomalyco/rune", rev = "9391c20d56daa8508c6b825c973157be5eb4a89a" }
 portable-pty = "0.9"
+libc = "0.2"
+alacritty_terminal = "0.26"
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 toml = "0.9"

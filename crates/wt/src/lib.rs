@@ -7,6 +7,8 @@ pub mod contract;
 #[cfg(feature = "ui")]
 pub mod input;
 pub mod launch;
+#[cfg(feature = "real-app")]
+pub mod real;
 pub mod session;
 mod stub;
 #[cfg(feature = "ui")]

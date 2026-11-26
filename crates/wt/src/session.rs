@@ -9,13 +9,12 @@
 //! single-threaded.
 
 use std::io::{Read, Write};
-use std::process::ExitStatus;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError};
 
 use crate::config::ResolvedProfile;
-use crate::contract::{Pty, PtySpec, Terminal};
+use crate::contract::{ExitStatus, Pty, PtySpec, Terminal};
 
 pub type Notify = Arc<dyn Fn() + Send + Sync>;
 
@@ -106,7 +105,7 @@ impl Session {
             }
         }
         if self.eof && self.exit.is_none() {
-            self.exit = self.pty.child_exited();
+            self.exit = self.pty.child_exited().map(ExitStatus::from);
             out.changed |= self.exit.is_some();
         }
         out

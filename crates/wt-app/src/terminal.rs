@@ -134,11 +134,15 @@ pub struct SpawnSpec {
     pub profile: String,
 }
 
+/// Wakes the UI thread when a pane has new output; the shell passes one to every spawn.
+/// Same shape as `wt_backend::Waker`/`rune::Waker` so either can be handed straight through.
+pub type Notify = std::sync::Arc<dyn Fn() + Send + Sync>;
+
 /// Creates a pane's terminal. The `wt` binary installs one backed by wt-backend + wt-vt.
-pub type TerminalFactory = Box<dyn Fn(&SpawnSpec) -> Box<dyn PaneTerminal>>;
+pub type TerminalFactory = Box<dyn Fn(&SpawnSpec, Notify) -> Box<dyn PaneTerminal>>;
 
 pub fn fake_factory() -> TerminalFactory {
-    Box::new(|spec| Box::new(FakeTerminal::new(spec)))
+    Box::new(|spec, _| Box::new(FakeTerminal::new(spec)))
 }
 
 /// A canned shell: a banner, a coloured `ls`, and a prompt that echoes typed keys. Enter

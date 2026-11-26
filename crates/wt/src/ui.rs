@@ -9,7 +9,9 @@ use std::time::{Duration, Instant};
 
 use rune::{App, AppSpec, Color, Cx, El, KeyEvent, TextStyle, Tx, Waker, col, row, text};
 
-use crate::config::{Chord, ColorScheme, Config, CursorShape, ResolvedProfile};
+use crate::config::{Chord, ColorScheme, Config, ResolvedProfile};
+#[cfg(not(feature = "real-vt"))]
+use crate::config::CursorShape;
 use crate::launch::{Launch, process_env};
 use crate::session::{Notify, Session, Tabs};
 
@@ -25,6 +27,8 @@ pub struct State {
     /// Grid size in cells every tab is sized to.
     grid: (u16, u16),
     font_size: f32,
+    /// Only the stub text view reads this; `real-vt` draws through `wt_render`.
+    #[cfg_attr(feature = "real-vt", allow(dead_code))]
     font_family_mono: bool,
     scheme: ColorScheme,
     /// Last laid-out screen rect, to refit the grid when the font size changes.

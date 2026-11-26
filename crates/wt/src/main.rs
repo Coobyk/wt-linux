@@ -42,9 +42,7 @@ fn main() -> ExitCode {
 
 #[cfg(feature = "real-app")]
 fn run(launch: launch::Launch) -> ExitCode {
-    // TODO(wt-app): proposed entry point; wt-app owns the window, tabs and keymap.
-    wt_app::run(launch.config, launch.first, launch.rune_args);
-    ExitCode::SUCCESS
+    wt::real::run(launch)
 }
 
 #[cfg(all(feature = "ui", not(feature = "real-app")))]

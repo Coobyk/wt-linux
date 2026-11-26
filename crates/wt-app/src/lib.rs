@@ -23,6 +23,7 @@ pub use keymap::Keymap;
 pub use layout::Layout;
 pub use rune;
 pub use terminal::FakeTerminal;
+pub use terminal::Notify;
 pub use terminal::PaneTerminal;
 pub use terminal::TerminalFactory;
 
@@ -69,11 +70,16 @@ fn scene_settings(s: &mut State) {
 pub fn spec() -> AppSpec<State> {
     AppSpec {
         scenes: SCENES,
+        setup: Some(setup),
         on_key: Some(view::on_key),
         poll: Some(view::poll),
         min_size: Some((480.0, 320.0)),
         ..AppSpec::new("wt-linux", (1100.0, 680.0), demo_state, view::view)
     }
+}
+
+fn setup(s: &mut State, waker: rune::Waker) {
+    s.set_waker(waker);
 }
 
 /// A demo state over `FakeTerminal`s with the sample config's profiles.
