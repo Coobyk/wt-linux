@@ -24,3 +24,19 @@ Feature targets, à la Windows Terminal:
 
 Each crate compiles independently against the contracts in
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
+## Run
+
+```
+cargo run -p wt --features real-app
+```
+
+The `real-app` feature wires wt-app's shell over wt-backend PTYs and
+wt-vt terminals. Without it, `wt` runs the in-crate stub UI; with neither
+`ui` nor `real-app` it runs headless and prints the session's final screen.
+
+Config lives at `$XDG_CONFIG_HOME/wt-linux/config.toml`
+(`wt-app/CONFIG.md` documents the schema; `wt --print-config` shows the
+effective config). `--profile NAME` and `--command CMD` override the first
+tab. `--rune <args> --` forwards to Rune's tooling:
+`wt --rune --snap shot.png --` renders a frame to a PNG without a display.
