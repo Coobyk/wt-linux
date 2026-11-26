@@ -260,8 +260,8 @@ impl Pty {
     }
 
     /// A blocking reader of the child's output. Each call dups the master fd; all readers
-    /// share one stream, so don't mix this with [`Pty::pump`]. Reads return `Ok(0)` (or an
-    /// `EIO` error on Linux) once the child side is closed.
+    /// share one stream, so don't mix this with [`Pty::pump`]. Reads return `Ok(0)` once every
+    /// holder of the child side has closed it.
     pub fn reader(&self) -> Box<dyn Read + Send> {
         let master = self.master.lock().unwrap();
         #[cfg(unix)]

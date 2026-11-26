@@ -14,7 +14,8 @@ use portable_pty::MasterPty;
 pub(crate) const CLOSE_POLL_MS: i32 = 100;
 
 pub(crate) enum Readiness {
-    Ready,
+    /// The `revents` poll reported.
+    Ready(i16),
     Timeout,
     Failed,
 }
@@ -28,8 +29,7 @@ pub(crate) fn poll(fd: RawFd, events: i16, timeout_ms: i32) -> Readiness {
     // SAFETY: one valid pollfd, owned by this frame.
     match unsafe { libc::poll(&mut pfd, 1, timeout_ms) } {
         0 => Readiness::Timeout,
-        // POLLHUP/POLLERR also land here; the read or write that follows reports them.
-        n if n > 0 => Readiness::Ready,
+        n if n > 0 => Readiness::Ready(pfd.revents),
         _ if io::Error::last_os_error().kind() == ErrorKind::Interrupted => Readiness::Timeout,
         _ => Readiness::Failed,
     }
@@ -61,7 +61,8 @@ pub(crate) fn set_nonblocking(master: &dyn MasterPty) -> Result<()> {
     Ok(())
 }
 
-/// `Pty::reader()`: blocking reads over the non-blocking master.
+/// `Pty::reader()`: blocking reads over the non-blocking master. Like portable-pty's reader,
+/// `EIO` (Linux: every slave closed) is EOF.
 pub(crate) struct BlockingReader(pub(crate) File);
 
 impl Read for BlockingReader {
@@ -73,6 +74,7 @@ impl Read for BlockingReader {
                         return Err(io::Error::last_os_error());
                     }
                 }
+                Err(e) if e.raw_os_error() == Some(libc::EIO) => return Ok(0),
                 r => return r,
             }
         }
@@ -95,10 +97,14 @@ impl Write for MasterWriter {
             }
             match self.file.write(buf) {
                 Err(e) if e.kind() == ErrorKind::WouldBlock => {
-                    if let Readiness::Failed =
-                        poll(self.file.as_raw_fd(), libc::POLLOUT, CLOSE_POLL_MS)
-                    {
-                        return Err(io::Error::last_os_error());
+                    match poll(self.file.as_raw_fd(), libc::POLLOUT, CLOSE_POLL_MS) {
+                        // Every slave closed: a full queue stays full (writes keep saying
+                        // EAGAIN), so stop instead of spinning.
+                        Readiness::Ready(ev) if ev & (libc::POLLHUP | libc::POLLERR) != 0 => {
+                            return Err(ErrorKind::BrokenPipe.into());
+                        }
+                        Readiness::Failed => return Err(io::Error::last_os_error()),
+                        _ => {}
                     }
                 }
                 r => return r,

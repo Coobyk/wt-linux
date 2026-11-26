@@ -381,14 +381,39 @@ fn writer_fails_after_drop() {
 fn drop_types_nothing_into_the_shell() {
     let marker = std::env::temp_dir().join(format!("wt-backend-submit-{}", std::process::id()));
     let _ = std::fs::remove_file(&marker);
-    let script = format!("trap '' HUP; read l && echo \"$l\" > '{}'", marker.display());
+    let script = format!(
+        "trap '' HUP; echo ready; read l && echo \"$l\" > '{}'",
+        marker.display()
+    );
     let pty = Pty::spawn(sh(&script)).unwrap();
     let exit = pty.exit.clone();
-    // Hold a master fd so the tty doesn't hang up (and discard input) when the Pty goes.
-    let _keep = pty.reader();
-    std::thread::sleep(Duration::from_millis(200));
+    // Holding a master fd keeps the tty from hanging up (and discarding input) on drop;
+    // reading it confirms the shell is waiting and the tty echoed the partial line.
+    // The read thread owns that fd until EOF, so it stays open across the drop.
+    let mut keep = pty.reader();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut buf = [0u8; 256];
+        while let Ok(n @ 1..) = keep.read(&mut buf) {
+            if tx.send(buf[..n].to_vec()).is_err() {
+                return;
+            }
+        }
+    });
+    let mut out = Vec::new();
+    let mut wait_for = |want: &str| {
+        let deadline = Instant::now() + TIMEOUT;
+        while !String::from_utf8_lossy(&out).contains(want) {
+            let left = deadline.saturating_duration_since(Instant::now());
+            match rx.recv_timeout(left) {
+                Ok(b) => out.extend_from_slice(&b),
+                Err(_) => panic!("no {want:?}; output: {:?}", String::from_utf8_lossy(&out)),
+            }
+        }
+    };
+    wait_for("ready");
     pty.writer().write_all(b"half-typed").unwrap();
-    std::thread::sleep(Duration::from_millis(100));
+    wait_for("half-typed");
     drop(pty);
     exit.wait_timeout(TIMEOUT).expect("child not killed");
     assert!(!marker.exists(), "dropping the pty submitted the pending line");
@@ -417,4 +442,27 @@ fn drop_releases_a_stalled_writer() {
         std::thread::sleep(Duration::from_millis(50));
     }
     let _ = std::fs::remove_file(&marker);
+}
+
+#[test]
+fn stalled_writer_stops_when_the_child_exits() {
+    // The paste stalls on a full tty queue, then the only slave holder exits; the writer
+    // must notice (writes start failing) instead of retrying forever.
+    let pty = Pty::spawn(sh("stty -icanon -echo; sleep 0.5")).unwrap();
+    let mut w = pty.writer();
+    w.write_all(&vec![b'x'; 1 << 20]).unwrap();
+    pty.wait();
+    let deadline = Instant::now() + TIMEOUT;
+    while w.write_all(b"x").is_ok() {
+        assert!(Instant::now() < deadline, "writer still running after the child exited");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[test]
+fn raw_reader_ends_with_eof() {
+    let pty = Pty::spawn(sh("printf 'all-done'")).unwrap();
+    let mut out = Vec::new();
+    pty.reader().read_to_end(&mut out).unwrap();
+    assert!(String::from_utf8_lossy(&out).contains("all-done"), "{out:?}");
 }
