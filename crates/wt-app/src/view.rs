@@ -1,6 +1,9 @@
 //! The window: tab bar, the active tab's content, and the palette / profile-menu overlays.
 use rune::tok::type_;
-use rune::{Align, Cursor, Cx, El, Key, KeyEvent, Phase, Side, Tx, col, el, row, text, text_input};
+use rune::{
+    Align, Cursor, Cx, El, Icon, Key, KeyEvent, Phase, Side, Tx, col, el, icon, row, text,
+    text_input,
+};
 
 use crate::action::Action;
 use crate::app::{Mode, State, TabKind, apply, run_action};
@@ -10,6 +13,44 @@ use crate::layout::{Layout, PaneId, Split};
 use crate::settings::settings_view;
 
 pub const TAB_BAR_H: f32 = 40.0;
+/// The titlebar drag strip above the tabs (Windows Terminal: 40 px row, 32 px tabs).
+const DRAG_H: f32 = 8.0;
+const TAB_H: f32 = TAB_BAR_H - DRAG_H;
+const CAPTION_W: f32 = 46.0;
+const TAB_MIN_W: f32 = 100.0;
+const TAB_MAX_W: f32 = 240.0;
+
+/// Segoe-MDL2-style glyphs as tiny SVGs (Rune `Icon`s draw `currentColor` tinted).
+static TERMINAL_GLYPH: Icon = Icon {
+    name: "terminal",
+    view: 16.0,
+    body: r#"<path d="M4.5 5.5L7.5 8.5L4.5 11.5M8.5 11.5H11.5" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"/><rect x="1.5" y="1.5" width="13" height="13" rx="1.5" stroke="currentColor" fill="none"/>"#,
+};
+static PLUS_GLYPH: Icon = Icon {
+    name: "plus",
+    view: 16.0,
+    body: r#"<path d="M8 3.5V12.5M3.5 8H12.5" stroke="currentColor" stroke-linecap="round"/>"#,
+};
+static CHEVRON_GLYPH: Icon = Icon {
+    name: "chevron-down",
+    view: 16.0,
+    body: r#"<path d="M4.5 6.5L8 10L11.5 6.5" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"/>"#,
+};
+static CLOSE_GLYPH: Icon = Icon {
+    name: "close",
+    view: 16.0,
+    body: r#"<path d="M4.5 4.5L11.5 11.5M11.5 4.5L4.5 11.5" stroke="currentColor"/>"#,
+};
+static MINIMIZE_GLYPH: Icon = Icon {
+    name: "minimize",
+    view: 16.0,
+    body: r#"<path d="M3.5 8H12.5" stroke="currentColor"/>"#,
+};
+static MAXIMIZE_GLYPH: Icon = Icon {
+    name: "maximize",
+    view: 16.0,
+    body: r#"<rect x="3.5" y="3.5" width="9" height="9" fill="none" stroke="currentColor"/>"#,
+};
 
 pub fn view(s: &State, cx: &mut Cx<State>) -> El {
     let th = Chrome::of(s.dark());
@@ -34,7 +75,7 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
         .h_full()
         .fill(th.window)
         .on_key_preview(|s: &mut State, ev: &KeyEvent, tx: &mut Tx| keymap_only(s, ev, tx))
-        .child(tab_bar(s, &th))
+        .child(tab_bar(s, cx, &th))
         .child(content);
     match &s.mode {
         Mode::Palette(_) => root = root.child(palette_view(s, cx, &th)),
@@ -67,19 +108,53 @@ pub fn poll(s: &mut State, _: f64, _: &mut Tx) -> bool {
     s.poll_terminals()
 }
 
-fn icon_button(key: impl Into<String>, label: &str, th: &Chrome) -> El {
+fn icon_button(key: impl Into<String>, label: &str, glyph: &'static Icon, th: &Chrome) -> El {
     el().key(key)
         .role("button")
         .label(label)
-        .size(28.0, 28.0)
+        .size(TAB_H, TAB_H)
         .center()
-        .radius(6.0)
+        .radius(4.0)
         .hover_fill(th.tab_hover)
-        .child(text(label).font(type_::BODY).color(th.text))
+        .child(icon(glyph, 14.0).color(th.text))
 }
 
-fn tab_bar(s: &State, th: &Chrome) -> El {
-    let mut strip = row().key("tab-strip").h_full().gap(2.0).items_end();
+/// A Windows caption button: 46 px wide, the full titlebar height; close hovers red.
+fn caption_button(key: &str, label: &str, glyph: &'static Icon, th: &Chrome, close: bool) -> El {
+    el().key(key)
+        .role("button")
+        .label(label)
+        .w(CAPTION_W)
+        .h_full()
+        .center()
+        .hover_fill(if close {
+            th.caption_close
+        } else {
+            th.caption_hover
+        })
+        .child(icon(glyph, 10.0).color(th.text))
+}
+
+/// `tab.background = terminalBackground`: the active tab takes the focused pane's scheme colour.
+fn active_tab_bg(s: &State, th: &Chrome) -> rune::Color {
+    if let Some(TabKind::Terminal { focused, .. }) = s.active_tab().map(|t| &t.kind)
+        && let Some(pane) = s.panes.get(focused)
+    {
+        let profile = s.profile(pane.profile);
+        return s.config.scheme(&profile.color_scheme).bg();
+    }
+    th.tab_active
+}
+
+fn tab_bar(s: &State, cx: &mut Cx<State>, th: &Chrome) -> El {
+    // "equal" widthStyle: tabs share the strip, clamped to a sane range.
+    let win_w = cx.layout_size("root").map_or(1100.0, |[w, _]| w);
+    let n = s.tabs.len().max(1) as f32;
+    let reserved = 3.0 * CAPTION_W + 2.0 * TAB_H + 12.0;
+    let tab_w = ((win_w - reserved) / n).clamp(TAB_MIN_W, TAB_MAX_W);
+    let active_bg = active_tab_bg(s, th);
+
+    let mut strip = row().key("tab-strip").h(TAB_H).gap(2.0).items_end();
     for (i, tab) in s.tabs.iter().enumerate() {
         let id = tab.id;
         let active = i == s.active;
@@ -105,40 +180,41 @@ fn tab_bar(s: &State, th: &Chrome) -> El {
                     false
                 }),
             _ => text(s.tab_title(i))
-                .font(type_::BODY)
+                .font(type_::LABEL)
                 .color(if active { th.text } else { th.text_dim })
                 .nowrap()
                 .truncate()
-                .max_w(180.0),
+                .grow(1.0)
+                .min_w(0.0),
         };
         let close = el()
             .key(format!("tab-{id}-close"))
             .role("button")
             .label("Close tab")
-            .size(20.0, 20.0)
+            .size(18.0, 18.0)
             .center()
             .radius(4.0)
             .hover_fill(th.tab_hover)
             .on_press_tx(move |s: &mut State, tx: &mut Tx| apply(s.close_tab_id(id), tx))
-            .child(text("×").font(type_::BODY).color(th.text_dim));
+            .child(icon(&CLOSE_GLYPH, 9.0).color(th.text_dim));
         let mut t = row()
             .key(format!("tab-{id}"))
             .role("tab")
             .label(s.tab_title(i))
-            .h(TAB_BAR_H - 6.0)
-            .min_w(120.0)
+            .h(TAB_H)
+            .w(tab_w)
             .pl(12.0)
             .pr(6.0)
             .gap(8.0)
             .center_y()
-            .justify_between()
-            .corners([8.0, 8.0, 0.0, 0.0])
+            .corners([6.0, 6.0, 0.0, 0.0])
             .on_press(move |s: &mut State| s.activate(i))
             .on_double_press_tx(move |s: &mut State, tx: &mut Tx| apply(s.start_rename(i), tx))
+            .child(icon(&TERMINAL_GLYPH, 15.0).color(if active { th.text } else { th.text_dim }))
             .child(title)
             .child(close);
         t = if active {
-            t.fill(th.tab_active)
+            t.fill(active_bg)
         } else {
             t.hover_fill(th.tab_hover)
         };
@@ -146,7 +222,7 @@ fn tab_bar(s: &State, th: &Chrome) -> El {
     }
     let strip = row()
         .key("tab-scroll")
-        .h_full()
+        .h(TAB_H)
         .min_w(0.0)
         .shrink()
         .scroll_x()
@@ -156,30 +232,48 @@ fn tab_bar(s: &State, th: &Chrome) -> El {
         .w_full()
         .h(TAB_BAR_H)
         .fill(th.tab_bar)
-        .px(8.0)
-        .pt(6.0)
-        .items_end()
-        .child(strip)
+        .child(
+            col()
+                .grow(1.0)
+                .min_w(0.0)
+                .h_full()
+                .child(el().h(DRAG_H))
+                .child(
+                    row()
+                        .h(TAB_H)
+                        .pl(4.0)
+                        .items_end()
+                        .child(strip)
+                        .child(
+                            row()
+                                .h(TAB_H)
+                                .center_y()
+                                .pl(2.0)
+                                .child(
+                                    icon_button("new-tab", "New tab", &PLUS_GLYPH, th)
+                                        .on_press_tx(|s: &mut State, tx: &mut Tx| {
+                                            run_action(s, Action::NewTab, tx)
+                                        }),
+                                )
+                                .child(
+                                    icon_button("profiles-button", "New tab menu", &CHEVRON_GLYPH, th)
+                                        .on_press(|s: &mut State| {
+                                            s.mode = if matches!(s.mode, Mode::ProfileMenu) {
+                                                Mode::Normal
+                                            } else {
+                                                Mode::ProfileMenu
+                                            };
+                                        }),
+                                ),
+                        ),
+                ),
+        )
         .child(
             row()
-                .h(TAB_BAR_H - 6.0)
-                .center_y()
-                .gap(2.0)
-                .pl(4.0)
-                .child(
-                    icon_button("new-tab", "+", th).on_press_tx(|s: &mut State, tx: &mut Tx| {
-                        run_action(s, Action::NewTab, tx)
-                    }),
-                )
-                .child(
-                    icon_button("profiles-button", "⌄", th).on_press(|s: &mut State| {
-                        s.mode = if matches!(s.mode, Mode::ProfileMenu) {
-                            Mode::Normal
-                        } else {
-                            Mode::ProfileMenu
-                        };
-                    }),
-                ),
+                .h_full()
+                .child(caption_button("cap-min", "Minimize", &MINIMIZE_GLYPH, th, false))
+                .child(caption_button("cap-max", "Maximize", &MAXIMIZE_GLYPH, th, false))
+                .child(caption_button("cap-close", "Close", &CLOSE_GLYPH, th, true)),
         )
 }
 
@@ -287,11 +381,12 @@ fn split_view(
         let w = if vertical { w.h_full() } else { w.w_full() };
         w.child(c)
     };
+    // The line itself is 1 px (Windows Terminal draws a hairline); the hit area stays wider.
     let mut divider = el()
         .key(format!("divider-{split_id}"))
         .role("separator")
         .label("Resize panes")
-        .fill(th.divider)
+        .center()
         .cursor(if vertical {
             Cursor::ResizeColumn
         } else {
@@ -319,9 +414,15 @@ fn split_view(
             },
         );
     divider = if vertical {
-        divider.w(4.0).h_full()
+        divider
+            .w(5.0)
+            .h_full()
+            .child(el().w(1.0).h_full().fill(th.divider))
     } else {
-        divider.h(4.0).w_full()
+        divider
+            .h(5.0)
+            .w_full()
+            .child(el().h(1.0).w_full().fill(th.divider))
     };
     let container = if vertical { row() } else { col() };
     container
@@ -336,7 +437,7 @@ fn split_view(
         .child(wrap(b, 1.0 - ratio))
 }
 
-fn pane_view(s: &State, th: &Chrome, id: PaneId, focused: bool) -> El {
+fn pane_view(s: &State, _th: &Chrome, id: PaneId, focused: bool) -> El {
     let Some(pane) = s.panes.get(&id) else {
         return el().key(format!("pane-{id}")).grow(1.0);
     };
@@ -347,18 +448,8 @@ fn pane_view(s: &State, th: &Chrome, id: PaneId, focused: bool) -> El {
         style: s.text_style(pane.profile),
         focused,
     };
-    let multi = matches!(
-        s.active_tab().map(|t| &t.kind),
-        Some(TabKind::Terminal {
-            layout: Layout::VSplit(_) | Layout::HSplit(_),
-            ..
-        })
-    );
-    let border = if focused && multi {
-        th.accent
-    } else {
-        scheme.bg().alpha(profile.opacity)
-    };
+    // Windows Terminal draws no focus border; panes meet at the hairline divider, and the
+    // default "padding" is 8 px.
     col()
         .key(format!("pane-{id}"))
         .role("group")
@@ -367,13 +458,12 @@ fn pane_view(s: &State, th: &Chrome, id: PaneId, focused: bool) -> El {
         .h_full()
         .min_w(0.0)
         .min_h(0.0)
-        .padding(4.0)
+        .padding(8.0)
         .fill(scheme.bg().alpha(profile.opacity))
-        .border(1.0, border)
         .clip_rounded(0.0)
         .cursor(Cursor::Text)
         .on_press(move |s: &mut State| s.focus_pane(id))
-        .on_layout(move |s: &mut State, r: [f32; 4]| s.fit_pane(id, r[2] - 8.0, r[3] - 8.0))
+        .on_layout(move |s: &mut State, r: [f32; 4]| s.fit_pane(id, r[2] - 16.0, r[3] - 16.0))
         .child(grid_view(pane.term.grid(), pane.term.cursor(), &look))
 }
 
@@ -381,34 +471,49 @@ fn palette_view(s: &State, cx: &mut Cx<State>, th: &Chrome) -> El {
     let Mode::Palette(p) = &s.mode else {
         return el();
     };
-    let width = 560.0;
     let win_w = cx.layout_size("root").map_or(1100.0, |[w, _]| w);
+    let width = (win_w * 0.55).clamp(400.0, 700.0);
     let matches = s.palette_matches();
     let selected = p.selected.min(matches.len().saturating_sub(1));
-    let input = text_input(&p.query, type_::BODY)
-        .key("palette-input")
-        .label("Command palette")
-        .placeholder("Type a command name", th.text_dim)
-        .color(th.text)
+    // Action mode shows a leading ">", like Windows Terminal's command mode.
+    let input = row()
+        .key("palette-input-row")
         .w_full()
         .h(36.0)
-        .px(10.0)
-        .radius(6.0)
+        .pl(10.0)
+        .pr(4.0)
+        .center_y()
+        .radius(4.0)
         .fill(th.input)
-        .border(1.0, th.accent)
-        .on_edit(|s: &mut State| s.mode_edit())
-        .on_submit(|s: &mut State, tx: &mut Tx| apply(s.palette_run(None), tx))
-        .on_input_key(|s: &mut State, ev: &KeyEvent, _: &mut Tx| match ev.key {
-            Key::Up => {
-                s.palette_move(-1);
-                true
-            }
-            Key::Down => {
-                s.palette_move(1);
-                true
-            }
-            _ => false,
-        });
+        .border(1.0, th.border)
+        .child(
+            text(">")
+                .font(type_::BODY)
+                .color(th.text_dim)
+                .pr(8.0),
+        )
+        .child(
+            text_input(&p.query, type_::BODY)
+                .key("palette-input")
+                .label("Command palette")
+                .placeholder("Type a command name", th.text_dim)
+                .color(th.text)
+                .grow(1.0)
+                .min_w(0.0)
+                .on_edit(|s: &mut State| s.mode_edit())
+                .on_submit(|s: &mut State, tx: &mut Tx| apply(s.palette_run(None), tx))
+                .on_input_key(|s: &mut State, ev: &KeyEvent, _: &mut Tx| match ev.key {
+                    Key::Up => {
+                        s.palette_move(-1);
+                        true
+                    }
+                    Key::Down => {
+                        s.palette_move(1);
+                        true
+                    }
+                    _ => false,
+                }),
+        );
     let mut list = col()
         .key("palette-list")
         .role("listbox")
@@ -462,11 +567,11 @@ fn palette_view(s: &State, cx: &mut Cx<State>, th: &Chrome) -> El {
         .w(width)
         .padding(8.0)
         .gap(6.0)
-        .radius(8.0)
+        .corners([0.0, 0.0, 8.0, 8.0])
         .fill(th.card)
         .border(1.0, th.border)
         .shadow(8.0, 24.0, rune::Color::BLACK.alpha(0.4))
-        .absolute(((win_w - width) / 2.0).max(0.0), TAB_BAR_H + 8.0)
+        .absolute(((win_w - width) / 2.0).max(0.0), TAB_BAR_H)
         .modal(true, |s: &mut State| s.mode = Mode::Normal)
         .child(input)
         .child(list)
