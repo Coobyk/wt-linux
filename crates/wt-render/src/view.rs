@@ -25,10 +25,10 @@ pub struct Damage {
 /// A Rune component that draws a terminal grid: call [`TerminalView::view`] from a view function.
 pub struct TerminalView {
     palette: Palette,
-    font_size: f32,
+    style: TextStyle,
     cell: Slot<Option<(f32, f32)>>,
     advance: Slot<Option<(u64, f32)>>,
-    focused: bool,
+    focused: Slot<bool>,
     config: Slot<u64>,
     rows: RefCell<Vec<CachedRow>>,
     damage: RefCell<Damage>,
@@ -42,13 +42,19 @@ impl Default for TerminalView {
 }
 
 impl TerminalView {
+    /// A view over `font_size` points of the bundled monospace face.
     pub fn new(palette: Palette, font_size: f32) -> TerminalView {
+        TerminalView::styled(palette, TextStyle::new(font_size, 400.0).mono())
+    }
+
+    /// A view drawing with `style` (its family and size; line height is the cell height's).
+    pub fn styled(palette: Palette, style: TextStyle) -> TerminalView {
         let v = TerminalView {
             palette,
-            font_size,
+            style,
             cell: Slot::new(None),
             advance: Slot::new(None),
-            focused: true,
+            focused: Slot::new(true),
             config: Slot::new(0),
             rows: RefCell::new(Vec::new()),
             damage: RefCell::new(Damage::default()),
@@ -71,23 +77,34 @@ impl TerminalView {
         self.rehash_config();
     }
 
+    /// The font this view draws in (profile font changes, zoom): everything re-shapes.
+    pub fn set_style(&mut self, style: TextStyle) {
+        self.style = style;
+        self.advance.set(None);
+        self.rehash_config();
+    }
+
+    pub fn style(&self) -> TextStyle {
+        self.style
+    }
+
     pub fn palette(&self) -> &Palette {
         &self.palette
     }
 
     /// Unfocused terminals draw their cursor as a hollow box.
-    pub fn set_focused(&mut self, focused: bool) {
-        self.focused = focused;
+    pub fn set_focused(&self, focused: bool) {
+        self.focused.set(focused);
     }
 
     pub fn metrics(&self) -> Metrics {
-        let base = TextStyle::new(self.font_size, 400.0).mono();
+        let base = self.style;
         let epoch = rune::text::font_epoch();
         let natural = match self.advance.get() {
             Some((e, w)) if e == epoch => w,
             _ => {
                 let w = rune::text::advance("0000000000", base) / 10.0;
-                let w = if w > 0.0 { w } else { self.font_size * 0.6 };
+                let w = if w > 0.0 { w } else { self.style.size * 0.6 };
                 self.advance.set(Some((epoch, w)));
                 self.rehash_config();
                 w
@@ -96,7 +113,7 @@ impl TerminalView {
         let (w, h) = self
             .cell
             .get()
-            .unwrap_or((natural, (self.font_size * 1.25).ceil()));
+            .unwrap_or((natural, (self.style.size * 1.25).ceil()));
         let style = TextStyle {
             tracking: w - natural,
             ..base
@@ -125,7 +142,7 @@ impl TerminalView {
     fn rehash_config(&self) {
         let mut h = DefaultHasher::new();
         self.palette.hash(&mut h);
-        self.font_size.to_bits().hash(&mut h);
+        self.style.hash(&mut h);
         if let Some((w, ch)) = self.cell.get() {
             (w.to_bits(), ch.to_bits()).hash(&mut h);
         }
@@ -161,7 +178,7 @@ impl TerminalView {
                 .then_some(RowCursor {
                     col: cursor.col,
                     shape: cursor.shape,
-                    focused: self.focused,
+                    focused: self.focused.get(),
                 });
             let inp = RowInput {
                 cells: &cells[..cells.len().min(cols as usize)],

@@ -11,7 +11,7 @@ height = 680
 # Defaults for profiles that don't set `font`.
 [font]
 family = "mono"           # "mono" (bundled), "system-mono", or a family name
-size = 13
+size = 12
 
 [[profiles]]
 name = "Bash"

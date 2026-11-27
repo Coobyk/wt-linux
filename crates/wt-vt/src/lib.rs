@@ -233,6 +233,10 @@ pub struct Terminal {
     title: Option<String>,
     cell_px: Option<(u16, u16)>,
     full_damage: bool,
+    /// The shape [`Self::cursor`] reports until the child sets DECSCUSR (the profile's
+    /// `cursorShape`). DECSCUSR 0 (reset) returns the cursor to this.
+    default_shape: CursorShape,
+    shape_set: bool,
 }
 
 impl Terminal {
@@ -255,7 +259,15 @@ impl Terminal {
             title: None,
             cell_px: None,
             full_damage: false,
+            default_shape: CursorShape::Block,
+            shape_set: false,
         }
+    }
+
+    /// The shape drawn while the child hasn't sent DECSCUSR (Windows Terminal's per-profile
+    /// `cursorShape`). Does not change what a DECSCUSR 0 reset restores — that's alacritty's.
+    pub fn set_default_cursor_shape(&mut self, shape: CursorShape) {
+        self.default_shape = shape;
     }
 
     /// Parse child output and update state. Partial escape sequences and partial UTF-8
@@ -266,6 +278,7 @@ impl Terminal {
             term: &mut self.term,
             listener: &self.listener,
             palette: &self.palette,
+            shape_set: &mut self.shape_set,
         };
         self.parser.advance(&mut shim, bytes);
         self.drain_alacritty_events();
@@ -300,6 +313,7 @@ impl Terminal {
             term: &mut self.term,
             listener: &self.listener,
             palette: &self.palette,
+            shape_set: &mut self.shape_set,
         };
         self.parser.stop_sync(&mut shim);
         self.drain_alacritty_events();
@@ -326,11 +340,15 @@ impl Terminal {
             .flags
             .contains(Flags::WIDE_CHAR);
         let style = self.term.cursor_style();
-        let shape = match style.shape {
-            ACursorShape::Block | ACursorShape::Hidden => CursorShape::Block,
-            ACursorShape::Underline => CursorShape::Underline,
-            ACursorShape::Beam => CursorShape::Beam,
-            ACursorShape::HollowBlock => CursorShape::HollowBlock,
+        let shape = if self.shape_set {
+            match style.shape {
+                ACursorShape::Block | ACursorShape::Hidden => CursorShape::Block,
+                ACursorShape::Underline => CursorShape::Underline,
+                ACursorShape::Beam => CursorShape::Beam,
+                ACursorShape::HollowBlock => CursorShape::HollowBlock,
+            }
+        } else {
+            self.default_shape
         };
         CursorState {
             row: point.line.0.max(0) as u16,

@@ -104,8 +104,8 @@ pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
 }
 
 /// `AppSpec::poll`.
-pub fn poll(s: &mut State, _: f64, _: &mut Tx) -> bool {
-    s.poll_terminals()
+pub fn poll(s: &mut State, _: f64, tx: &mut Tx) -> bool {
+    s.poll_terminals(tx)
 }
 
 fn icon_button(key: impl Into<String>, label: &str, glyph: &'static Icon, th: &Chrome) -> El {
@@ -237,7 +237,12 @@ fn tab_bar(s: &State, cx: &mut Cx<State>, th: &Chrome) -> El {
                 .grow(1.0)
                 .min_w(0.0)
                 .h_full()
-                .child(el().h(DRAG_H))
+                .child(
+                    el().key("drag-strip")
+                        .w_full()
+                        .h(DRAG_H)
+                        .on_double_press_tx(|_: &mut State, tx: &mut Tx| tx.toggle_maximized()),
+                )
                 .child(
                     row()
                         .h(TAB_H)
@@ -271,9 +276,18 @@ fn tab_bar(s: &State, cx: &mut Cx<State>, th: &Chrome) -> El {
         .child(
             row()
                 .h_full()
-                .child(caption_button("cap-min", "Minimize", &MINIMIZE_GLYPH, th, false))
-                .child(caption_button("cap-max", "Maximize", &MAXIMIZE_GLYPH, th, false))
-                .child(caption_button("cap-close", "Close", &CLOSE_GLYPH, th, true)),
+                .child(
+                    caption_button("cap-min", "Minimize", &MINIMIZE_GLYPH, th, false)
+                        .on_press_tx(|_: &mut State, tx: &mut Tx| tx.minimize()),
+                )
+                .child(
+                    caption_button("cap-max", "Maximize", &MAXIMIZE_GLYPH, th, false)
+                        .on_press_tx(|_: &mut State, tx: &mut Tx| tx.toggle_maximized()),
+                )
+                .child(
+                    caption_button("cap-close", "Close", &CLOSE_GLYPH, th, true)
+                        .on_press_tx(|_: &mut State, tx: &mut Tx| tx.close_window()),
+                ),
         )
 }
 
@@ -354,7 +368,7 @@ fn profile_menu(s: &State, th: &Chrome) -> El {
 
 fn layout_view(s: &State, cx: &mut Cx<State>, th: &Chrome, layout: &Layout, focused: PaneId) -> El {
     match layout {
-        Layout::Pane(id) => pane_view(s, th, *id, *id == focused),
+        Layout::Pane(id) => pane_view(s, cx, th, *id, *id == focused),
         Layout::VSplit(sp) => split_view(s, cx, th, sp, focused, true),
         Layout::HSplit(sp) => split_view(s, cx, th, sp, focused, false),
     }
@@ -437,20 +451,15 @@ fn split_view(
         .child(wrap(b, 1.0 - ratio))
 }
 
-fn pane_view(s: &State, _th: &Chrome, id: PaneId, focused: bool) -> El {
+fn pane_view(s: &State, cx: &mut Cx<State>, _th: &Chrome, id: PaneId, focused: bool) -> El {
     let Some(pane) = s.panes.get(&id) else {
         return el().key(format!("pane-{id}")).grow(1.0);
     };
     let profile = s.profile(pane.profile);
     let scheme = s.config.scheme(&profile.color_scheme);
-    let look = GridLook {
-        scheme: &scheme,
-        style: s.text_style(pane.profile),
-        focused,
-    };
     // Windows Terminal draws no focus border; panes meet at the hairline divider, and the
     // default "padding" is 8 px.
-    col()
+    let body = col()
         .key(format!("pane-{id}"))
         .role("group")
         .label(format!("Terminal: {}", profile.name))
@@ -463,8 +472,84 @@ fn pane_view(s: &State, _th: &Chrome, id: PaneId, focused: bool) -> El {
         .clip_rounded(0.0)
         .cursor(Cursor::Text)
         .on_press(move |s: &mut State| s.focus_pane(id))
-        .on_layout(move |s: &mut State, r: [f32; 4]| s.fit_pane(id, r[2] - 16.0, r[3] - 16.0))
-        .child(grid_view(pane.term.grid(), pane.term.cursor(), &look))
+        .on_layout(move |s: &mut State, r: [f32; 4]| s.fit_pane(id, r[2] - 16.0, r[3] - 16.0));
+
+    let Some(src) = pane.term.term_source() else {
+        let look = GridLook {
+            scheme: &scheme,
+            style: s.text_style(pane.profile),
+            focused,
+        };
+        return body.child(grid_view(pane.term.grid(), pane.term.cursor(), &look));
+    };
+
+    let m = pane.view.metrics();
+    let (cw, lh) = (m.cell_w, m.cell_h);
+    let (cols, rows) = src.size();
+    let history = src.history();
+    let scroll = pane.scroll.min(history);
+    let grid_el = el()
+        .key(format!("grid-{id}"))
+        .on_wheel(move |s: &mut State, ev: rune::WheelEvent, _: &mut Tx| {
+            s.wheel_pane(id, ev.dy, lh);
+            true
+        })
+        .on_drag(move |s: &mut State, d: &mut rune::Drag, _: &mut Tx| {
+            sel_drag(s, id, d, cols, cw, lh)
+        })
+        .child(pane.view.view(src, pane.sel, scroll));
+
+    // A thin overlay scrollbar while scrollback exists, like Windows Terminal's: the thumb's
+    // share is the screen's share of all lines, parked at the bottom at scroll 0.
+    let mut body = body.child(grid_el);
+    if history > 0
+        && let Some([w, h]) = cx.layout_size(&format!("pane-{id}"))
+    {
+        let thumb_h = (h * rows as f32 / (rows as usize + history) as f32).max(16.0);
+        let frac = 1.0 - scroll as f32 / history as f32;
+        body = body.child(
+            el().key(format!("scrollbar-{id}"))
+                .size(4.0, thumb_h)
+                .absolute(w - 5.0, (h - thumb_h) * frac)
+                .radius(2.0)
+                .fill(rune::Color::WHITE.alpha(if scroll > 0 { 0.3 } else { 0.18 })),
+        );
+    }
+    body
+}
+
+/// A pointer drag over a pane's grid is a text selection, in `TermSource` line space.
+fn sel_drag(s: &mut State, id: PaneId, d: &mut rune::Drag, cols: u16, cw: f32, lh: f32) {
+    let Some(p) = s.panes.get_mut(&id) else {
+        return;
+    };
+    let (history, rows) = p
+        .term
+        .term_source()
+        .map(|t| (t.history(), t.size().1))
+        .unwrap_or((0, 1));
+    let cell = |x: f32, y: f32| {
+        wt_render::Point::new(
+            ((y / lh).floor() as i32 - p.scroll as i32)
+                .clamp(-(history as i32), rows as i32 - 1),
+            ((x / cw).floor().max(0.0) as u16).min(cols.saturating_sub(1)),
+        )
+    };
+    match d.phase {
+        Phase::Down => {
+            p.sel = wt_render::Selection::None;
+            p.sel_anchor = Some(cell(d.start_x, d.start_y));
+        }
+        Phase::Move => {
+            if let Some(a) = p.sel_anchor {
+                p.sel = wt_render::Selection::Range {
+                    start: a,
+                    end: cell(d.x, d.y),
+                };
+            }
+        }
+        Phase::Up => p.sel_anchor = None,
+    }
 }
 
 fn palette_view(s: &State, cx: &mut Cx<State>, th: &Chrome) -> El {

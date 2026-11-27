@@ -33,6 +33,21 @@ fn state<T>(rt: &mut Runtime<State>, f: impl FnOnce(&State) -> T) -> T {
     out.unwrap()
 }
 
+/// Every pane's grid as text. Terminal cells render inside `grid` elements, not `text`, so
+/// `texts` can't see them.
+fn pane_texts(rt: &mut Runtime<State>) -> String {
+    state(rt, |s| {
+        s.panes
+            .values()
+            .flat_map(|p| {
+                let g = p.term.grid();
+                (0..g.rows).map(|r| g.row_text(r)).collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    })
+}
+
 fn chord(key: Key, shift: bool) -> KeyEvent {
     KeyEvent {
         key,
@@ -69,8 +84,9 @@ fn tabs_and_split_with_fake_terminal_render() {
     assert_eq!(k.iter().filter(|k| k.starts_with("divider-")).count(), 2);
     assert!(panes.is_some());
     let t = texts(&rt);
-    assert!(t.contains("wt-linux fake terminal (Bash)"), "{t}");
-    assert!(t.contains("cargo build -p wt-app"));
+    let pt = pane_texts(&mut rt);
+    assert!(pt.contains("wt-linux fake terminal (Bash)"), "{pt}");
+    assert!(pt.contains("cargo build -p wt-app"), "{pt}");
     assert!(t.contains("build"), "renamed tab title");
 
     // Panes share the content area side by side, then stacked on the right.
@@ -116,7 +132,8 @@ fn keymap_drives_the_runtime() {
         });
     }
     rt.frame(0.0);
-    assert!(texts(&rt).contains("$ ls\n") || texts(&rt).lines().any(|l| l.ends_with("$ ls")));
+    let pt = pane_texts(&mut rt);
+    assert!(pt.lines().any(|l| l.ends_with("$ ls")), "{pt}");
     let before = state(&mut rt, |s| s.font_size(0));
     rt.key(chord(Key::Command('='), false));
     rt.frame(0.0);

@@ -17,6 +17,8 @@ pub(crate) struct Shim<'a> {
     pub term: &'a mut Term<Listener>,
     pub listener: &'a Listener,
     pub palette: &'a Palette,
+    /// Set while a DECSCUSR is in force; [`Terminal::cursor`] then reports the app's shape.
+    pub shape_set: &'a mut bool,
 }
 
 impl Shim<'_> {
@@ -73,11 +75,14 @@ impl Handler for Shim<'_> {
         Handler::set_title(self.term, a0)
     }
 
+    /// DECSCUSR: `Some` takes over the drawn shape until `None` restores the profile default.
     fn set_cursor_style(&mut self, a0: Option<CursorStyle>) {
+        *self.shape_set = a0.is_some();
         Handler::set_cursor_style(self.term, a0)
     }
 
     fn set_cursor_shape(&mut self, a0: CursorShape) {
+        *self.shape_set = true;
         Handler::set_cursor_shape(self.term, a0)
     }
 

@@ -25,6 +25,16 @@ pub struct Pane {
     pub term: Box<dyn PaneTerminal>,
     /// The content box the pane was last fitted to, for refitting when the font changes.
     pub fit: Option<(f32, f32)>,
+    /// The pane's renderer: rows are cached and only damaged rows re-shape each frame.
+    pub view: wt_render::TerminalView,
+    /// Scrollback lines the viewport is scrolled back by (0 follows the output).
+    pub scroll: usize,
+    /// The selection, in `TermSource` line space (negative lines are scrollback).
+    pub sel: wt_render::Selection,
+    /// Fractional wheel delta not yet a whole row.
+    pub wheel: f32,
+    /// Grid point an in-progress drag selection started from.
+    pub sel_anchor: Option<wt_render::Point>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -73,12 +83,18 @@ pub const SETTINGS_SECTIONS: &[(SettingsSection, &str)] = &[
 ];
 
 /// What an action asks of the host after mutating state.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Effect {
     None,
     Focus(&'static str),
     Blur,
     Quit,
+    /// Write the text to the clipboard (a selection copy, an OSC 52 store).
+    CopyText(String),
+    /// Read the clipboard and paste it into the focused pane.
+    Paste,
+    /// Enter or leave full screen.
+    Fullscreen,
 }
 
 pub struct State {
@@ -209,7 +225,8 @@ impl State {
     pub fn text_style(&self, profile: usize) -> TextStyle {
         let font = self.config.font_for(self.profile(profile));
         let family = match font.family.as_str() {
-            "" | "mono" => Family::Mono,
+            // "monospace" is wt's default face name; it means the app-chosen mono.
+            "" | "mono" | "monospace" => Family::Mono,
             "system-mono" => Family::SystemMono,
             other => Family::Named(intern(other)),
         };
@@ -218,6 +235,11 @@ impl State {
 
     pub fn dark(&self) -> bool {
         self.config.theme == Theme::Dark
+    }
+
+    /// The profile's scheme as wt-render's `Palette`.
+    pub fn palette(&self, profile: usize) -> wt_render::Palette {
+        crate::scheme::render_palette(&self.config.scheme(&self.profile(profile).color_scheme))
     }
 
     fn spawn_pane(&mut self, profile: usize) -> PaneId {
@@ -230,6 +252,7 @@ impl State {
             cols: INITIAL_COLS,
             rows: INITIAL_ROWS,
             profile: p.name.clone(),
+            cursor_shape: p.cursor_shape,
         };
         let term = (self.factory)(&spec, self.notify.clone());
         let id = self.id();
@@ -239,6 +262,14 @@ impl State {
                 profile,
                 term,
                 fit: None,
+                view: wt_render::TerminalView::styled(
+                    self.palette(profile),
+                    self.text_style(profile),
+                ),
+                scroll: 0,
+                sel: wt_render::Selection::None,
+                wheel: 0.0,
+                sel_anchor: None,
             },
         );
         id
@@ -405,6 +436,98 @@ impl State {
         }
     }
 
+    /// Scroll a pane's viewport by `lines` (positive shows scrollback), clamped to history.
+    pub fn scroll_pane(&mut self, pane: PaneId, lines: isize) {
+        let Some(p) = self.panes.get_mut(&pane) else {
+            return;
+        };
+        let history = p.term.term_source().map_or(0, |t| t.history()) as isize;
+        p.scroll = (p.scroll as isize + lines).clamp(0, history) as usize;
+    }
+
+    /// A notched/precise wheel over a pane: arrow keys on the alt screen when the child
+    /// wants them (`?1007` alternate scroll), else viewport scrollback.
+    pub fn wheel_pane(&mut self, pane: PaneId, dy: f32, cell_h: f32) {
+        let Some(p) = self.panes.get_mut(&pane) else {
+            return;
+        };
+        let modes = p.term.modes();
+        if modes.alt_screen && modes.alternate_scroll {
+            let n = (dy.abs() / cell_h).ceil().clamp(1.0, 10.0) as usize;
+            let seq: &[u8] = match (dy > 0.0, modes.app_cursor) {
+                (true, true) => b"\x1bOA",
+                (true, false) => b"\x1b[A",
+                (false, true) => b"\x1bOB",
+                (false, false) => b"\x1b[B",
+            };
+            let mut out = Vec::with_capacity(seq.len() * n);
+            for _ in 0..n {
+                out.extend_from_slice(seq);
+            }
+            p.term.write(&out);
+            return;
+        }
+        p.wheel += dy;
+        let lines = (p.wheel / cell_h).trunc();
+        p.wheel -= lines * cell_h;
+        if lines != 0.0 {
+            self.scroll_pane(pane, lines as isize);
+        }
+    }
+
+    /// The selected text of a pane, trimmed line by line and joined with `\n`.
+    pub fn selection_text(&self, pane: PaneId) -> Option<String> {
+        let p = self.panes.get(&pane)?;
+        let src = p.term.term_source()?;
+        let (lo, hi) = (-(src.history() as i32), src.size().1 as i32 - 1);
+        let mut cells = Vec::new();
+        let mut out = String::new();
+        let mut push = |line: i32, from: u16, to: u16| {
+            cells.clear();
+            src.line(line, &mut cells);
+            let (a, b) = (
+                (from as usize).min(cells.len()),
+                (to as usize).min(cells.len()),
+            );
+            let text: String = cells[a.min(b)..a.max(b)].iter().map(|c| c.ch).collect();
+            out.push_str(text.trim_end());
+            out.push('\n');
+        };
+        match p.sel {
+            wt_render::Selection::None => return None,
+            wt_render::Selection::Range { start, end } => {
+                let (a, b) = (start.min(end), start.max(end));
+                for line in a.line.clamp(lo, hi)..=b.line.clamp(lo, hi) {
+                    let from = if line == a.line { a.col } else { 0 };
+                    let to = if line == b.line {
+                        b.col.saturating_add(1)
+                    } else {
+                        src.size().0
+                    };
+                    push(line, from, to);
+                }
+            }
+            wt_render::Selection::Block { start, end } => {
+                let (a, b) = (start.line.min(end.line), start.line.max(end.line));
+                for line in a.clamp(lo, hi)..=b.clamp(lo, hi) {
+                    push(line, start.col.min(end.col), start.col.max(end.col) + 1);
+                }
+            }
+        }
+        while out.ends_with('\n') {
+            out.pop();
+        }
+        (!out.is_empty()).then_some(out)
+    }
+
+    /// `Action::Copy`: the focused pane's selection onto the clipboard.
+    fn copy_selection(&mut self) -> Effect {
+        self.focused_pane()
+            .and_then(|id| self.selection_text(id))
+            .map(Effect::CopyText)
+            .unwrap_or(Effect::None)
+    }
+
     /// Everything the palette can run: simple actions, one per profile, one per tab.
     pub fn palette_items(&self) -> Vec<PaletteItem> {
         let key = |a: Action| self.keymap.keys_for(a).first().map(|k| pretty(k));
@@ -523,6 +646,27 @@ impl State {
                 self.font_delta = 0.0;
                 self.refit();
             }
+            Action::Copy => return self.copy_selection(),
+            Action::Paste => return Effect::Paste,
+            Action::ScrollUp | Action::ScrollDown | Action::ScrollPageUp
+            | Action::ScrollPageDown => {
+                if let Some(pane) = self.focused_pane() {
+                    let rows = self
+                        .panes
+                        .get(&pane)
+                        .and_then(|p| p.term.term_source())
+                        .map_or(1, |t| t.size().1) as isize;
+                    let lines = match action {
+                        Action::ScrollUp => 1,
+                        Action::ScrollDown => -1,
+                        Action::ScrollPageUp => rows,
+                        Action::ScrollPageDown => -rows,
+                        _ => 0,
+                    };
+                    self.scroll_pane(pane, lines);
+                }
+            }
+            Action::ToggleFullscreen => return Effect::Fullscreen,
             Action::Quit => return Effect::Quit,
         }
         Effect::None
@@ -540,6 +684,8 @@ impl State {
             return (false, Effect::None);
         };
         if let Some(p) = self.panes.get_mut(&pane) {
+            // Typing follows the output again (Windows Terminal's "snap on input").
+            p.scroll = 0;
             p.term.write(&bytes);
         }
         (true, Effect::None)
@@ -550,12 +696,10 @@ impl State {
         let Some(p) = self.panes.get(&pane) else {
             return;
         };
-        let (cw, lh) = cell_size(self.font_size(p.profile));
-        let cols = ((w / cw).floor() as u16).max(2);
-        let rows = ((h / lh).floor() as u16).max(1);
+        let (cols, rows) = p.view.grid_size_for((w, h));
         if let Some(p) = self.panes.get_mut(&pane) {
             p.fit = Some((w, h));
-            p.term.resize(cols, rows);
+            p.term.resize(cols.max(2), rows);
         }
     }
 
@@ -571,10 +715,51 @@ impl State {
         }
     }
 
-    pub fn poll_terminals(&mut self) -> bool {
+    /// Drains child output and UI requests for every pane, refreshes each pane's renderer
+    /// state (palette, font, focus) and serves OSC 52 clipboard requests through `tx`.
+    pub fn poll_terminals(&mut self, tx: &mut Tx) -> bool {
+        let focused = self.focused_pane();
+        let styles: std::collections::BTreeMap<PaneId, TextStyle> = self
+            .panes
+            .iter()
+            .map(|(&id, p)| (id, self.text_style(p.profile)))
+            .collect();
+        let palettes: std::collections::BTreeMap<PaneId, wt_render::Palette> = self
+            .panes
+            .iter()
+            .map(|(&id, p)| (id, self.palette(p.profile)))
+            .collect();
+        let mut events = Vec::new();
         let mut changed = false;
-        for p in self.panes.values_mut() {
+        for (&id, p) in self.panes.iter_mut() {
             changed |= p.term.poll();
+            events.extend(p.term.take_ui_events().into_iter().map(|e| (id, e)));
+            let focused = focused == Some(id);
+            p.term.set_focused(focused);
+            p.view.set_focused(focused);
+            if let Some(pal) = palettes.get(&id) {
+                p.view.set_palette(pal.clone());
+            }
+            if let Some(style) = styles.get(&id) {
+                p.view.set_style(*style);
+            }
+        }
+        for (id, ev) in events {
+            match ev {
+                crate::terminal::UiEvent::CopyText(text) => tx.copy(text),
+                crate::terminal::UiEvent::LoadClipboard { format } => {
+                    tx.read_clipboard(move |s: &mut State, content: &rune::ClipboardContent, _| {
+                        let text = content.text();
+                        if !text.is_empty()
+                            && let Some(p) = s.panes.get_mut(&id)
+                        {
+                            let out = format(text);
+                            p.term.write(out.as_bytes());
+                        }
+                    });
+                }
+                crate::terminal::UiEvent::Bell => {}
+            }
         }
         changed
     }
@@ -592,6 +777,24 @@ pub fn apply(effect: Effect, tx: &mut Tx) {
         Effect::Focus(key) => tx.focus_when_shown(key, false),
         Effect::Blur => tx.blur(),
         Effect::Quit => tx.quit(),
+        Effect::CopyText(text) => tx.copy(text),
+        Effect::Paste => {
+            tx.read_clipboard(|s: &mut State, content: &rune::ClipboardContent, _| {
+                let text = content.text();
+                if text.is_empty() {
+                    return;
+                }
+                let Some(id) = s.focused_pane() else { return };
+                let Some(p) = s.panes.get_mut(&id) else { return };
+                p.scroll = 0;
+                if p.term.modes().bracketed_paste {
+                    p.term.write(format!("\x1b[200~{text}\x1b[201~").as_bytes());
+                } else {
+                    p.term.write(text.as_bytes());
+                }
+            });
+        }
+        Effect::Fullscreen => tx.toggle_full_screen(),
     }
 }
 

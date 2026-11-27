@@ -34,3 +34,9 @@ parley_engine = { git = "https://github.com/anomalyco/rune", rev = "9391c20d56da
 accesskit_windows = { git = "https://github.com/anomalyco/rune", rev = "9391c20d56daa8508c6b825c973157be5eb4a89a" }
 accesskit_atspi_common = { git = "https://github.com/anomalyco/rune", rev = "9391c20d56daa8508c6b825c973157be5eb4a89a" }
 accesskit_macos = { git = "https://github.com/anomalyco/rune", rev = "9391c20d56daa8508c6b825c973157be5eb4a89a" }
+
+# Thin LTO over the whole tree (rune included): terminal rendering is a hot loop, and one
+# codegen unit lets it inline across crate boundaries.
+[profile.release]
+lto = "thin"
+codegen-units = 1

@@ -2,9 +2,14 @@
 //! shell runs and renders headless before wt-backend/wt-vt land.
 //!
 //! `Cell`, `CellColor`, `Attrs`, `CursorState` and `GridSnapshot` mirror the wt-vt contract in
-//! docs/ARCHITECTURE.md (char, fg/bg as palette index or RGB, attrs, wide flag). Once wt-vt
-//! exports `GridView`/`CursorState`, `PaneTerminal` gets an impl over `wt_backend::Pty` +
-//! `wt_vt::Terminal` in the `wt` crate and these mirrors become re-exports.
+//! docs/ARCHITECTURE.md (char, fg/bg as palette index or RGB, attrs, wide flag). Real
+//! terminals render through [`PaneTerminal::term_source`] (wt-render's `TerminalView` reads a
+//! `TermSource` straight off the `wt_vt::Terminal`, no snapshot); the snapshot path stays for
+//! fakes and tests.
+use std::sync::Arc;
+
+use wt_render::{Attrs as RAttrs, Cell as RCell, CursorState as RCursor};
+use wt_render::{CursorShape as RShape, TermSource, VtColor, Width};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum CellColor {
@@ -101,6 +106,45 @@ impl GridSnapshot {
     }
 }
 
+/// The cursor shape the profile asks for until the child sends DECSCUSR
+/// (Windows Terminal's `cursorShape`; `vintage`/`filledBox` map to `Block`,
+/// `doubleUnderscore` to `Underline`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CursorShape {
+    /// WT's `"bar"`.
+    #[default]
+    Bar,
+    Block,
+    Underline,
+}
+
+/// The modes a pane's child has set that change host behaviour (see `wt_vt::Modes`).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PaneModes {
+    /// Wheel on the alternate screen sends arrow keys instead of scrolling (`CSI ?1007h`).
+    pub alternate_scroll: bool,
+    /// Pastes to the child are wrapped in `ESC[200~`/`ESC[201~` (`CSI ?2004h`).
+    pub bracketed_paste: bool,
+    /// The child is on the alternate screen.
+    pub alt_screen: bool,
+    /// DECCKM: arrows (and alternate-scroll keys) are `ESC O` rather than `ESC [` sequences.
+    pub app_cursor: bool,
+}
+
+/// Something the child asked the host to do (`wt_vt::TermEvent`, reduced to what the shell
+/// can serve): copy to the clipboard, or answer an OSC 52 paste request.
+pub enum UiEvent {
+    /// OSC 52 store: put the text on the clipboard.
+    CopyText(String),
+    /// OSC 52 load: read the clipboard, then write `format(text)` to the child.
+    LoadClipboard {
+        format: Arc<dyn Fn(&str) -> String + Send + Sync>,
+    },
+    /// BEL.
+    Bell,
+}
+
 /// One pane's terminal session: PTY + VT state behind one object.
 pub trait PaneTerminal {
     fn grid(&self) -> &GridSnapshot;
@@ -119,6 +163,20 @@ pub trait PaneTerminal {
     fn exited(&self) -> bool {
         false
     }
+    /// The live terminal as a wt-render `TermSource`; `None` draws the snapshot instead.
+    fn term_source(&self) -> Option<&dyn TermSource> {
+        None
+    }
+    /// Modes the child set that the host reacts to; zero for fakes.
+    fn modes(&self) -> PaneModes {
+        PaneModes::default()
+    }
+    /// The pane's keyboard focus changed; real terminals forward `ESC[I`/`ESC[O` under `?1004`.
+    fn set_focused(&mut self, _focused: bool) {}
+    /// Clipboard/title/bell requests the child made since the last call.
+    fn take_ui_events(&mut self) -> Vec<UiEvent> {
+        Vec::new()
+    }
 }
 
 /// What a pane is spawned from: the fields of `wt_backend::PtySpec` resolved from a profile.
@@ -132,6 +190,49 @@ pub struct SpawnSpec {
     pub rows: u16,
     /// Profile name, for fakes and diagnostics.
     pub profile: String,
+    /// The profile's `cursorShape`.
+    pub cursor_shape: CursorShape,
+}
+
+/// The app's cell as wt-render's; the snapshot -> `TermSource` adapters share it.
+pub fn render_cell(c: &Cell) -> RCell {
+    let mut attrs = RAttrs::default();
+    let mut set = |f: Attrs, to: RAttrs| {
+        if c.attrs.has(f) {
+            attrs = attrs | to;
+        }
+    };
+    set(Attrs::BOLD, RAttrs::BOLD);
+    set(Attrs::DIM, RAttrs::DIM);
+    set(Attrs::ITALIC, RAttrs::ITALIC);
+    set(Attrs::UNDERLINE, RAttrs::UNDERLINE);
+    set(Attrs::INVERSE, RAttrs::INVERSE);
+    set(Attrs::STRIKETHROUGH, RAttrs::STRIKE);
+    RCell {
+        ch: c.ch,
+        zerowidth: None,
+        fg: match c.fg {
+            CellColor::Default => VtColor::Default,
+            CellColor::Indexed(i) => VtColor::Indexed(i),
+            CellColor::Rgb(r, g, b) => VtColor::Rgb(r, g, b),
+        },
+        bg: match c.bg {
+            CellColor::Default => VtColor::Default,
+            CellColor::Indexed(i) => VtColor::Indexed(i),
+            CellColor::Rgb(r, g, b) => VtColor::Rgb(r, g, b),
+        },
+        attrs,
+        width: if c.wide { Width::Wide } else { Width::Narrow },
+    }
+}
+
+/// The app's cursor shape as wt-render's.
+pub fn render_shape(s: CursorShape) -> RShape {
+    match s {
+        CursorShape::Bar => RShape::Line,
+        CursorShape::Block => RShape::Block,
+        CursorShape::Underline => RShape::Underline,
+    }
 }
 
 /// Wakes the UI thread when a pane has new output; the shell passes one to every spawn.
@@ -152,6 +253,7 @@ pub struct FakeTerminal {
     cursor: CursorState,
     line: String,
     prompt: String,
+    cursor_shape: CursorShape,
 }
 
 const GREEN: CellColor = CellColor::Indexed(10);
@@ -171,6 +273,7 @@ impl FakeTerminal {
             },
             line: String::new(),
             prompt: "user@wt-linux".into(),
+            cursor_shape: spec.cursor_shape,
         };
         let cmd = std::iter::once(spec.program.as_str())
             .chain(spec.args.iter().map(String::as_str))
@@ -345,6 +448,35 @@ impl PaneTerminal for FakeTerminal {
     fn title(&self) -> Option<String> {
         None
     }
+
+    fn term_source(&self) -> Option<&dyn TermSource> {
+        Some(self)
+    }
+}
+
+impl TermSource for FakeTerminal {
+    fn size(&self) -> (u16, u16) {
+        (self.grid.cols, self.grid.rows)
+    }
+
+    fn history(&self) -> usize {
+        0
+    }
+
+    fn line(&self, line: i32, out: &mut Vec<RCell>) {
+        if line >= 0 && (line as u16) < self.grid.rows {
+            out.extend(self.grid.row(line as u16).iter().map(render_cell));
+        }
+    }
+
+    fn cursor(&self) -> RCursor {
+        RCursor {
+            col: self.cursor.col,
+            row: self.cursor.row,
+            shape: render_shape(self.cursor_shape),
+            visible: self.cursor.visible,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -360,6 +492,7 @@ mod tests {
             cols: 40,
             rows: 8,
             profile: "Bash".into(),
+            cursor_shape: CursorShape::Bar,
         }
     }
 
@@ -368,7 +501,7 @@ mod tests {
         let mut t = FakeTerminal::new(&spec());
         assert!(t.grid().row_text(0).contains("fake terminal (Bash)"));
         assert!(t.grid().row_text(1).contains("bash -l"));
-        let row = t.cursor().row;
+        let row = PaneTerminal::cursor(&t).row;
         t.write(b"echo hi");
         assert_eq!(t.pending_line(), "echo hi");
         assert!(t.grid().row_text(row).ends_with("$ echo hi"));
@@ -377,7 +510,7 @@ mod tests {
         t.write(b"\r");
         assert!(
             t.grid()
-                .row_text(t.cursor().row - 1)
+                .row_text(PaneTerminal::cursor(&t).row - 1)
                 .contains("echo: fake terminal")
         );
     }
@@ -388,23 +521,23 @@ mod tests {
         for _ in 0..20 {
             t.write(b"x\r");
         }
-        assert_eq!(t.cursor().row, 7);
+        assert_eq!(PaneTerminal::cursor(&t).row, 7);
         t.resize(20, 3);
         assert_eq!((t.grid().cols, t.grid().rows), (20, 3));
-        assert_eq!(t.cursor().row, 2);
+        assert_eq!(PaneTerminal::cursor(&t).row, 2);
         assert!(t.grid().row_text(2).starts_with("user@wt-linux"));
     }
 
     #[test]
     fn backspace_unwraps_to_the_previous_row() {
         let mut t = FakeTerminal::new(&spec());
-        let row = t.cursor().row;
-        let fill = 40 - t.cursor().col as usize;
+        let row = PaneTerminal::cursor(&t).row;
+        let fill = 40 - PaneTerminal::cursor(&t).col as usize;
         t.write("a".repeat(fill).as_bytes());
         t.write(b"b");
-        assert_eq!((t.cursor().row, t.cursor().col), (row + 1, 1));
+        assert_eq!((PaneTerminal::cursor(&t).row, PaneTerminal::cursor(&t).col), (row + 1, 1));
         t.write(b"\x7f\x7f");
-        assert_eq!((t.cursor().row, t.cursor().col), (row, 39));
+        assert_eq!((PaneTerminal::cursor(&t).row, PaneTerminal::cursor(&t).col), (row, 39));
         assert_eq!(t.grid().row_text(row).trim_end().chars().count(), 39);
         assert!(t.grid().row_text(row + 1).trim().is_empty());
         assert_eq!(t.pending_line(), "a".repeat(fill - 1));

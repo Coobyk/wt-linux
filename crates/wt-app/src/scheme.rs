@@ -111,6 +111,26 @@ pub fn hex_color(s: &str) -> Color {
         .unwrap_or_else(|| rgb(255, 0, 255))
 }
 
+/// The scheme as wt-render's `Palette` (sRGB byte triples).
+pub fn render_palette(s: &ColorScheme) -> wt_render::Palette {
+    let hex = |x: &str| parse_hex(x).map(|(r, g, b)| [r, g, b]).unwrap_or([0, 0, 0]);
+    wt_render::Palette {
+        fg: hex(&s.foreground),
+        bg: hex(&s.background),
+        cursor: s
+            .cursor
+            .as_deref()
+            .map(hex)
+            .unwrap_or_else(|| hex(&s.foreground)),
+        selection: s
+            .selection_background
+            .as_deref()
+            .map(hex)
+            .unwrap_or([0xff, 0xff, 0xff]),
+        ansi: std::array::from_fn(|i| hex(s.ansi_hex(i as u8))),
+    }
+}
+
 pub fn parse_hex(s: &str) -> Option<(u8, u8, u8)> {
     let s = s.trim().trim_start_matches('#');
     if s.len() != 6 || !s.is_ascii() {

@@ -11,11 +11,12 @@ use std::process::ExitCode;
 use wt_app::config::{self as ac, KeySpec};
 use wt_app::scheme::ColorScheme as AppScheme;
 use wt_app::terminal::{
-    Attrs as AAttrs, Cell as ACell, CellColor, CursorState as ACursor, GridSnapshot, Notify,
-    PaneTerminal, SpawnSpec, TerminalFactory,
+    Attrs as AAttrs, Cell as ACell, CellColor, CursorShape, CursorState as ACursor, GridSnapshot,
+    Notify, PaneModes, PaneTerminal, SpawnSpec, TerminalFactory, UiEvent,
 };
 use wt_backend::{Pty, PtyEvent, PtyEvents, PtySpec};
-use wt_vt::{Attrs as VAttrs, CellWidth, Color as VColor, Terminal};
+use wt_vt::{TermEvent, Terminal};
+use wt_render::TermSource;
 
 use crate::config::{self, ColorScheme, Profile, ResolvedProfile};
 use crate::launch::Launch;
@@ -40,14 +41,15 @@ pub fn factory(scrollback: usize) -> TerminalFactory {
     })
 }
 
-/// One pane: child process on a PTY, its output parsed by a VT terminal.
+/// One pane: child process on a PTY, its output parsed by a VT terminal the shell draws
+/// directly through wt-render's `TermSource` (no per-frame grid copy).
 pub struct RealTerminal {
     pty: Pty,
     events: PtyEvents,
     term: Terminal,
     writer: Box<dyn Write + Send>,
     grid: GridSnapshot,
-    cursor: ACursor,
+    ui_events: Vec<UiEvent>,
     exited: bool,
 }
 
@@ -63,47 +65,21 @@ impl RealTerminal {
         })?;
         let events = pty.pump(Some(notify))?;
         let writer = pty.writer();
-        let term = Terminal::new(spec.cols.max(1), spec.rows.max(1), scrollback);
+        let mut term = Terminal::new(spec.cols.max(1), spec.rows.max(1), scrollback);
+        term.set_default_cursor_shape(match spec.cursor_shape {
+            CursorShape::Bar => wt_vt::CursorShape::Beam,
+            CursorShape::Block => wt_vt::CursorShape::Block,
+            CursorShape::Underline => wt_vt::CursorShape::Underline,
+        });
         Ok(RealTerminal {
             pty,
             events,
             term,
             writer,
-            grid: GridSnapshot::new(spec.cols.max(1), spec.rows.max(1)),
-            cursor: ACursor {
-                col: 0,
-                row: 0,
-                visible: false,
-            },
+            grid: GridSnapshot::new(1, 1),
+            ui_events: Vec::new(),
             exited: false,
         })
-    }
-
-    /// Copy the VT grid into the snapshot the shell draws.
-    fn snapshot(&mut self) {
-        let g = self.term.grid();
-        let (cols, rows) = (g.cols(), g.rows());
-        if (cols, rows) != (self.grid.cols, self.grid.rows) {
-            self.grid = GridSnapshot::new(cols, rows);
-        }
-        for r in 0..rows {
-            for c in 0..cols {
-                let cell = g.cell(r, c);
-                self.grid.cells[r as usize * cols as usize + c as usize] = ACell {
-                    ch: cell.ch,
-                    fg: color(cell.fg),
-                    bg: color(cell.bg),
-                    attrs: attrs(cell.attrs),
-                    wide: cell.width == CellWidth::Wide,
-                };
-            }
-        }
-        let c = self.term.cursor();
-        self.cursor = ACursor {
-            col: c.col,
-            row: c.row,
-            visible: c.visible,
-        };
     }
 }
 
@@ -113,7 +89,12 @@ impl PaneTerminal for RealTerminal {
     }
 
     fn cursor(&self) -> ACursor {
-        self.cursor
+        let c = self.term.cursor();
+        ACursor {
+            col: c.col,
+            row: c.row,
+            visible: c.visible,
+        }
     }
 
     fn write(&mut self, bytes: &[u8]) {
@@ -123,7 +104,6 @@ impl PaneTerminal for RealTerminal {
     fn resize(&mut self, cols: u16, rows: u16) {
         self.term.resize(cols, rows);
         let _ = self.pty.resize(cols, rows);
-        self.snapshot();
     }
 
     fn poll(&mut self) -> bool {
@@ -145,13 +125,22 @@ impl PaneTerminal for RealTerminal {
         if !replies.is_empty() {
             let _ = self.writer.write_all(&replies);
         }
-        // Title/Bell/clipboard events need no shell handling yet; `title()` reads OSC 0/2.
-        let _ = self.term.take_events();
-        if out.is_empty() && !exited {
-            return false;
+        for ev in self.term.take_events() {
+            match ev {
+                TermEvent::ClipboardStore { text, .. } => {
+                    self.ui_events.push(UiEvent::CopyText(text))
+                }
+                TermEvent::ClipboardLoad { format, .. } => {
+                    self.ui_events.push(UiEvent::LoadClipboard { format })
+                }
+                TermEvent::Bell => self.ui_events.push(UiEvent::Bell),
+                TermEvent::Title(_)
+                | TermEvent::ResetTitle
+                | TermEvent::CursorBlinkingChange
+                | TermEvent::MouseCursorDirty => {}
+            }
         }
-        self.snapshot();
-        true
+        !(out.is_empty() && self.ui_events.is_empty() && !exited)
     }
 
     fn title(&self) -> Option<String> {
@@ -160,6 +149,28 @@ impl PaneTerminal for RealTerminal {
 
     fn exited(&self) -> bool {
         self.exited || self.pty.child_exited().is_some()
+    }
+
+    fn term_source(&self) -> Option<&dyn TermSource> {
+        Some(&self.term)
+    }
+
+    fn modes(&self) -> PaneModes {
+        let m = self.term.modes();
+        PaneModes {
+            alternate_scroll: m.alternate_scroll,
+            bracketed_paste: m.bracketed_paste,
+            alt_screen: m.alt_screen,
+            app_cursor: m.app_cursor,
+        }
+    }
+
+    fn set_focused(&mut self, focused: bool) {
+        self.term.set_focused(focused);
+    }
+
+    fn take_ui_events(&mut self) -> Vec<UiEvent> {
+        std::mem::take(&mut self.ui_events)
     }
 }
 
@@ -222,39 +233,6 @@ impl PaneTerminal for FailedTerminal {
     }
 }
 
-fn color(c: VColor) -> CellColor {
-    match c {
-        VColor::Default => CellColor::Default,
-        VColor::Indexed(i) => CellColor::Indexed(i),
-        VColor::Rgb(rgb) => CellColor::Rgb(rgb.r, rgb.g, rgb.b),
-    }
-}
-
-fn attrs(a: VAttrs) -> AAttrs {
-    let mut out = AAttrs::default();
-    let set = |f: VAttrs, to: AAttrs, out: &mut AAttrs| {
-        if a.contains(f) {
-            *out = *out | to;
-        }
-    };
-    set(VAttrs::BOLD, AAttrs::BOLD, &mut out);
-    set(VAttrs::DIM, AAttrs::DIM, &mut out);
-    set(VAttrs::ITALIC, AAttrs::ITALIC, &mut out);
-    set(
-        VAttrs::UNDERLINE
-            | VAttrs::DOUBLE_UNDERLINE
-            | VAttrs::UNDERCURL
-            | VAttrs::DOTTED_UNDERLINE
-            | VAttrs::DASHED_UNDERLINE,
-        AAttrs::UNDERLINE,
-        &mut out,
-    );
-    set(VAttrs::STRIKETHROUGH, AAttrs::STRIKETHROUGH, &mut out);
-    set(VAttrs::INVERSE, AAttrs::INVERSE, &mut out);
-    set(VAttrs::BLINK, AAttrs::BLINK, &mut out);
-    out
-}
-
 /// wt's resolved config -> wt-app's. The window size is cells in wt's schema and points in
 /// wt-app's, so it's scaled by the resolved font's cell size.
 fn to_app_config(cfg: &config::Config, first: &ResolvedProfile) -> ac::Config {
@@ -264,7 +242,7 @@ fn to_app_config(cfg: &config::Config, first: &ResolvedProfile) -> ac::Config {
             .font_family
             .clone()
             .unwrap_or_else(|| "mono".into()),
-        size: cfg.defaults.font_size.unwrap_or(13.0),
+        size: cfg.defaults.font_size.unwrap_or(12.0),
     };
     let (cw, lh) = wt_app::app::cell_size(font.size);
     let mut app = ac::Config {
@@ -321,7 +299,16 @@ fn to_app_profile(cfg: &config::Config, p: &Profile, font: &ac::FontConfig) -> a
             }
         }),
         opacity: 1.0,
+        cursor_shape: merged.cursor_shape.map(app_shape).unwrap_or_default(),
         hidden: merged.hidden.unwrap_or(false),
+    }
+}
+
+fn app_shape(s: config::CursorShape) -> CursorShape {
+    match s {
+        config::CursorShape::Bar => CursorShape::Bar,
+        config::CursorShape::Block => CursorShape::Block,
+        config::CursorShape::Underline => CursorShape::Underline,
     }
 }
 
@@ -336,6 +323,7 @@ fn patch_profile(p: &mut ac::Profile, first: &ResolvedProfile) {
         family: first.font_family.clone(),
         size: first.font_size,
     });
+    p.cursor_shape = app_shape(first.cursor_shape);
 }
 
 fn first_profile(first: &ResolvedProfile) -> ac::Profile {

@@ -28,6 +28,14 @@ pub enum Action {
     FontSizeIncrease,
     FontSizeDecrease,
     FontSizeReset,
+    Copy,
+    Paste,
+    /// One scrollback line up.
+    ScrollUp,
+    ScrollDown,
+    ScrollPageUp,
+    ScrollPageDown,
+    ToggleFullscreen,
     Quit,
 }
 
@@ -48,6 +56,13 @@ pub const SIMPLE: &[Action] = &[
     Action::FontSizeIncrease,
     Action::FontSizeDecrease,
     Action::FontSizeReset,
+    Action::Copy,
+    Action::Paste,
+    Action::ScrollUp,
+    Action::ScrollDown,
+    Action::ScrollPageUp,
+    Action::ScrollPageDown,
+    Action::ToggleFullscreen,
     Action::Quit,
 ];
 
@@ -71,6 +86,13 @@ impl Action {
             Action::FontSizeIncrease => "font_size_increase",
             Action::FontSizeDecrease => "font_size_decrease",
             Action::FontSizeReset => "font_size_reset",
+            Action::Copy => "copy",
+            Action::Paste => "paste",
+            Action::ScrollUp => "scroll_up",
+            Action::ScrollDown => "scroll_down",
+            Action::ScrollPageUp => "scroll_page_up",
+            Action::ScrollPageDown => "scroll_page_down",
+            Action::ToggleFullscreen => "toggle_fullscreen",
             Action::Quit => "quit",
         }
     }
@@ -95,6 +117,13 @@ impl Action {
             Action::FontSizeIncrease => "Increase font size".into(),
             Action::FontSizeDecrease => "Decrease font size".into(),
             Action::FontSizeReset => "Reset font size".into(),
+            Action::Copy => "Copy".into(),
+            Action::Paste => "Paste".into(),
+            Action::ScrollUp => "Scroll up".into(),
+            Action::ScrollDown => "Scroll down".into(),
+            Action::ScrollPageUp => "Scroll up one page".into(),
+            Action::ScrollPageDown => "Scroll down one page".into(),
+            Action::ToggleFullscreen => "Toggle fullscreen".into(),
             Action::Quit => "Quit".into(),
         }
     }
@@ -136,11 +165,18 @@ impl FromStr for Action {
                 _ => Err(err()),
             };
         }
-        SIMPLE
-            .iter()
-            .copied()
-            .find(|a| a.name() == s)
-            .ok_or_else(err)
+        if let Some(a) = SIMPLE.iter().copied().find(|a| a.name() == s) {
+            return Ok(a);
+        }
+        // Windows Terminal's settings.json spellings, accepted beside ours.
+        match s {
+            "increase_font_size" => Ok(Action::FontSizeIncrease),
+            "decrease_font_size" => Ok(Action::FontSizeDecrease),
+            "reset_font_size" => Ok(Action::FontSizeReset),
+            "command_palette" => Ok(Action::OpenPalette),
+            "close_pane" => Ok(Action::ClosePane),
+            _ => Err(err()),
+        }
     }
 }
 

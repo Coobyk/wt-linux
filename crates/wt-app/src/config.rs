@@ -63,7 +63,7 @@ impl Default for FontConfig {
     fn default() -> FontConfig {
         FontConfig {
             family: "mono".into(),
-            size: 13.0,
+            size: 12.0,
         }
     }
 }
@@ -82,6 +82,8 @@ pub struct Profile {
     pub font: Option<FontConfig>,
     /// Background opacity, 0.0..=1.0.
     pub opacity: f32,
+    /// The cursor drawn before the child sends DECSCUSR.
+    pub cursor_shape: crate::terminal::CursorShape,
     pub hidden: bool,
 }
 
@@ -96,6 +98,7 @@ impl Default for Profile {
             color_scheme: "Campbell".into(),
             font: None,
             opacity: 1.0,
+            cursor_shape: crate::terminal::CursorShape::Bar,
             hidden: false,
         }
     }

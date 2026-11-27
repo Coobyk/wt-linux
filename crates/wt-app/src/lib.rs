@@ -66,6 +66,17 @@ fn scene_settings(s: &mut State) {
     s.settings_section = app::SettingsSection::Profiles;
 }
 
+/// The bundled fonts: Inter for chrome text, Cascadia Mono for the terminal (Windows
+/// Terminal's default face; embedded so every machine renders identically).
+const FONTS: &[&[u8]] = &[
+    include_bytes!("../assets/Inter-Regular.ttf"),
+    include_bytes!("../assets/Inter-Medium.ttf"),
+    include_bytes!("../assets/Inter-SemiBold.ttf"),
+    include_bytes!("../assets/CascadiaMono-Regular.ttf"),
+    include_bytes!("../assets/CascadiaMono-Bold.ttf"),
+    include_bytes!("../assets/CascadiaMono-Italic.ttf"),
+];
+
 /// The window's spec. `init` builds a default-config state; use [`app`] to supply one.
 pub fn spec() -> AppSpec<State> {
     AppSpec {
@@ -74,6 +85,8 @@ pub fn spec() -> AppSpec<State> {
         on_key: Some(view::on_key),
         poll: Some(view::poll),
         min_size: Some((480.0, 320.0)),
+        fonts: FONTS,
+        families: ("Inter", "Cascadia Mono, ui-monospace"),
         ..AppSpec::new("wt-linux", (1100.0, 680.0), demo_state, view::view)
     }
 }
